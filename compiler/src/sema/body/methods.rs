@@ -155,6 +155,25 @@ impl Body<'_, '_> {
         }
         let formal = self.receiver_formal(&selection, span)?;
         let (receiver, prelude) = self.receiver_storage(receiver, formal, name, span);
+        let receiver = if matches!(
+            self.context
+                .program
+                .contracts
+                .intrinsics
+                .get(&selection.definition),
+            Some(crate::contracts::Intrinsic::TaskJoin | crate::contracts::Intrinsic::TaskIgnore)
+        ) {
+            self.add_expr(
+                H::Unary {
+                    op: U::Move,
+                    operand: receiver,
+                },
+                self.ty(receiver),
+                span,
+            )
+        } else {
+            receiver
+        };
         let receiver = self.method_receiver(receiver, formal, span);
         let ty = self
             .context
@@ -369,8 +388,9 @@ impl Body<'_, '_> {
             .enumerate()
             .find(|(_, field)| field.name == name.symbol)?;
         let (field_ty, visibility, field_span) = (field.ty, field.visibility, field.span);
-        if visibility == ast::Visibility::Private
-            && self.context.definition(definition).module != self.module
+        if !self
+            .context
+            .field_visible(definition, visibility, self.module)
         {
             self.context
                 .error("E-NAME-PRIVATE", "this field is private", field_span);
@@ -410,7 +430,10 @@ impl Body<'_, '_> {
         }
         let selected = selections.pop().expect("one candidate");
         let declaration = self.context.definition(selected.definition);
-        if declaration.visibility == ast::Visibility::Private && declaration.module != self.module {
+        if !self
+            .context
+            .visible(declaration.visibility, declaration.module, self.module)
+        {
             self.context
                 .error("E-NAME-PRIVATE", "this method is private", name.span);
             return None;

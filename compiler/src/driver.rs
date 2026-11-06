@@ -6,14 +6,17 @@ use std::{
     process::ExitCode,
 };
 
+mod modules;
 mod options;
 
 const HELP: &str = r#"Cavo frontend
 
-Usage: cavoite [check|parse|lex] [--emit=ast|hir|mir|mono|local|tokens|interface] FILE...
+Usage: cavoite [check|parse|lex] [--emit=ast|hir|mir|mono|local|tokens|interface|contracts|module] FILE...
+       cavoite check --manifest-path Cavo.toml [--locked] [--offline]
+       cavoite lock --manifest-path Cavo.toml [--offline]
        cavoite summary-id FILE
 
-check  Check types, local moves, NLL and supported region contracts (default).
+check  Check types, ownership, regions, contracts, effects and scoped tasks (default).
 parse  Parse the language grammar and dump AST.
 lex    Dump tokens with original UTF-8 byte spans.
 
@@ -23,9 +26,15 @@ lex    Dump tokens with original UTF-8 byte spans.
 --emit=local            Dump CFG, findings and external assumption dependencies.
 --emit=mir              Lower and verify MIR with explicit cleanup paths.
 --emit=mono             Instantiate generics; dump concrete MIR, layout and glue.
+--emit=contracts        Emit versioned evidence, assumptions and retained checks as JSON.
+--emit=module           Emit a checked frontend module capsule; no native object code.
+--module FILE           Load and independently recheck a module capsule.
+--manifest-path FILE    Resolve the package's declared sources and pinned dependencies.
+--locked                Require an exact Cavo.lock match.
+--offline               Use local sources and already cached pinned Git dependencies.
 
-This foundation does not generate code. General heap/effect/contract and task
-analyses are pending; full memory safety is unverified.
+This frontend does not generate native code or execute LLAM tasks. Unestablished
+safety obligations are rejected; native code and runtime verification is pending.
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +43,7 @@ enum Mode {
     Parse,
     Lex,
     SummaryId,
+    Lock,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Emit {
@@ -45,6 +55,8 @@ enum Emit {
     Local,
     Tokens,
     Interface,
+    Module,
+    Contracts,
 }
 
 pub fn main_entry() -> ExitCode {
@@ -92,30 +104,75 @@ fn run_inner(
             return Ok(2);
         }
     };
-    let options::Options {
-        mode,
-        emit,
-        paths,
-        summary_paths,
-        trusted,
-    } = options;
-    if mode == Mode::SummaryId {
-        let text = read_summary(&paths[0])?;
+    execute(options, output, error)
+}
+
+fn execute(
+    options: options::Options,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<u8> {
+    if options.mode == Mode::SummaryId {
+        let text = read_summary(&options.paths[0])?;
         writeln!(output, "{}", crate::external::Summaries::digest(&text))?;
         return Ok(0);
     }
+    let package = if let Some(path) = &options.manifest {
+        match crate::packages::resolve(path, options.locked, options.offline) {
+            Ok(graph) => Some(graph),
+            Err(message) => {
+                writeln!(error, "cavoite: {message}")?;
+                return Ok(1);
+            }
+        }
+    } else {
+        None
+    };
+    if options.mode == Mode::Lock {
+        let graph = package.expect("validated lock options");
+        return match graph.write_lock() {
+            Ok(()) => {
+                writeln!(output, "locked {} package(s)", graph.packages.len())?;
+                Ok(0)
+            }
+            Err(message) => {
+                writeln!(error, "cavoite: {message}")?;
+                Ok(1)
+            }
+        };
+    }
+    let mode = options.mode;
+    let emit = options.emit;
+    let Some((mut compilation, count)) = load_inputs(options, package.as_ref(), output, error)?
+    else {
+        return Ok(2);
+    };
+    compile_output(&mut compilation, mode, emit, count, output, error)
+}
+
+fn load_inputs(
+    options: options::Options,
+    package: Option<&crate::packages::Graph>,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<Option<(Compilation, usize)>> {
     let mut compilation = Compilation::default();
-    for path in summary_paths {
+    if !modules::load(&mut compilation, options.modules, error)? {
+        return Ok(None);
+    }
+    for path in options.summary_paths {
         let text = read_summary(&path)?;
         compilation.add_external_summary(&path, text);
     }
-    for digest in trusted {
+    for digest in options.trusted {
         compilation.trust_summary(digest);
     }
-    let Some(file_count) = load_sources(&mut compilation, paths, mode, output, error)? else {
-        return Ok(2);
+    let files = if let Some(package) = package {
+        modules::load_package(&mut compilation, package, error)?
+    } else {
+        load_sources(&mut compilation, options.paths, options.mode, output, error)?
     };
-    compile_output(&mut compilation, mode, emit, file_count, output, error)
+    Ok(files.map(|count| (compilation, count)))
 }
 
 fn compile_output(
@@ -129,11 +186,14 @@ fn compile_output(
     if emit == Emit::Mono {
         return emit_monomorphized(compilation, output, error);
     }
+    if emit == Emit::Module {
+        return modules::emit(compilation, output, error);
+    }
     let mut mir = None;
     let hir = if mode == Mode::Check {
         if emit == Emit::Interface {
             compilation.check_types()
-        } else if emit == Emit::Mir {
+        } else if matches!(emit, Emit::Mir | Emit::Contracts) {
             compilation.check_mir().map(|(hir, lowered)| {
                 mir = Some(lowered);
                 hir
@@ -145,10 +205,18 @@ fn compile_output(
         None
     };
     emit_local(compilation, emit, output)?;
+    if emit == Emit::Contracts
+        && let Some(analysis) = &compilation.mir_analysis
+    {
+        output.write_all(analysis.contracts.json(&compilation.sources).as_bytes())?;
+    }
     if emit_diagnostics(compilation, error)? {
         return Ok(1);
     }
     if let Some(mir) = mir {
+        if emit == Emit::Contracts {
+            return Ok(0);
+        }
         let hir = hir.as_ref().expect("MIR emission retains its typed HIR");
         output.write_all(mir.dump(hir, &compilation.symbols).as_bytes())?;
         if let Some(analysis) = &compilation.mir_analysis {
@@ -246,13 +314,13 @@ fn emit_success(
                 symbols(compilation, output)?;
             } else if emit != Emit::Local {
                 let analysis = if compilation.mir_analysis.is_some() {
-                    "MIR ownership, region, cleanup and effect checks applied"
+                    "MIR ownership, region, cleanup, effect, contract and task checks applied"
                 } else {
                     "whole-program local move/borrow checks applied"
                 };
                 writeln!(
                     output,
-                    "type-checked {file_count} file(s); {analysis}; full ownership/effect/contract verification is pending"
+                    "type-checked {file_count} file(s); {analysis}; native code and runtime verification is pending"
                 )?;
             }
         }
@@ -261,7 +329,7 @@ fn emit_success(
             symbols(compilation, output)?;
         }
         Mode::Lex => {}
-        Mode::SummaryId => unreachable!("handled before parsing"),
+        Mode::SummaryId | Mode::Lock => unreachable!("handled before parsing"),
     }
     Ok(0)
 }

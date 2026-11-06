@@ -25,7 +25,7 @@ impl Body<'_, '_> {
                 .iter()
                 .skip(1)
                 .map(|local| {
-                    let local = &function.locals[local.0 as usize];
+                    let local = &function.locals[local];
                     (local.name, local.ty)
                 })
                 .collect(),
@@ -65,7 +65,7 @@ impl Body<'_, '_> {
             parameters: Vec::new(),
             result: TyId::VOID,
         });
-        self.context.program.definitions[owner.0 as usize].ty = placeholder;
+        self.context.program.definitions[owner].ty = placeholder;
         let mut checker = Body::new(self.context, self.module, owner, span);
         let arguments = checker.context.program.types.generic_arguments(owner);
         checker.function.result =
@@ -94,13 +94,13 @@ impl Body<'_, '_> {
             .function
             .parameters
             .iter()
-            .map(|local| checker.function.locals[local.0 as usize].ty)
+            .map(|local| checker.function.locals[local].ty)
             .collect();
         let signature = checker.context.program.types.intern(Ty::Function {
             parameters,
             result: checker.function.result,
         });
-        checker.context.program.definitions[owner.0 as usize].ty = signature;
+        checker.context.program.definitions[owner].ty = signature;
         let function = checker.function;
         self.context.program.functions.push(function);
         owner
@@ -187,7 +187,7 @@ impl Body<'_, '_> {
         let mut arguments = vec![receiver];
         for index in 1..self.function.parameters.len() {
             let local = self.function.parameters[index];
-            let ty = self.function.locals[local.0 as usize].ty;
+            let ty = self.function.locals[local].ty;
             let operand = self.add_expr(H::Local(local), ty, span);
             arguments.push(self.add_expr(
                 H::Unary {

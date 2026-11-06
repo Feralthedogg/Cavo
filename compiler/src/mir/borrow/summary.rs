@@ -1,13 +1,16 @@
 //! Entry-relative memory transformers inferred from the execution CFG. Each
 //! outcome has its own post-state: a cancelled call never initializes its out.
 
-pub(super) mod drops;
+mod declarations;
+pub(crate) mod drops;
 mod external;
+pub(crate) use declarations::footprint;
 mod signature;
 
 use super::*;
 use crate::external::{AssumptionId, SummaryReport};
-pub(super) use signature::{Frame, Requirement, Storage, children};
+pub(super) use signature::children;
+pub(crate) use signature::{Frame, Requirement, Storage};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -33,10 +36,17 @@ pub enum Origin {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Value {
+    pub parameters: BTreeMap<Vec<Step>, BTreeSet<ParameterOrigin>>,
     pub fields: BTreeMap<Vec<Step>, BTreeSet<Origin>>,
     pub functions: BTreeSet<hir::DefId>,
     pub vtables: BTreeSet<u32>,
     pub unknown: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ParameterOrigin {
+    pub parameter: u32,
+    pub path: Vec<Step>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -95,6 +105,7 @@ impl FunctionSummary {
 }
 
 pub(super) struct Summaries {
+    pub declared: Vec<Option<FunctionSummary>>,
     pub functions: Vec<Option<FunctionSummary>>,
     pub frames: Vec<Option<Frame>>,
     pub static_origin: bool,
@@ -138,6 +149,15 @@ fn initial(
         }
     }
     let mut functions = vec![None; hir.definitions.len()];
+    let mut declared = vec![None; hir.definitions.len()];
+    for (&definition, contract) in &hir.modular.functions {
+        if crate::modular::usable(hir, definition)
+            && let Some(frame) = &frames[definition.0 as usize]
+        {
+            declared[definition.0 as usize] =
+                declarations::declared(definition, contract, frame, hir);
+        }
+    }
     for body in &mir.functions {
         functions[body.definition.0 as usize] = Some(FunctionSummary::bottom(body.definition));
     }
@@ -154,10 +174,20 @@ fn initial(
         .functions
         .iter()
         .any(|body| body.blocks.iter().any(static_block))
+        || declared.iter().flatten().any(|s| {
+            s.normal.as_ref().is_some_and(|out| {
+                out.returned
+                    .fields
+                    .values()
+                    .flatten()
+                    .any(|origin| *origin == Origin::Static)
+            })
+        })
         || external
             .iter()
             .any(|record| record.returns.iter().any(|origin| origin == "static"));
     Summaries {
+        declared,
         functions,
         frames,
         static_origin,
@@ -192,7 +222,7 @@ fn static_block(block: &Block) -> bool {
         || matches!(&block.terminator, Terminator::Call { arguments, .. } if arguments.iter().any(static_operand))
 }
 
-pub(super) fn body_targets(body: &Body, hir: &hir::Program) -> BTreeSet<hir::DefId> {
+pub(crate) fn body_targets(body: &Body, hir: &hir::Program) -> BTreeSet<hir::DefId> {
     let mut targets = BTreeSet::new();
     for block in &body.blocks {
         for statement in &block.statements {

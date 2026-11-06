@@ -127,6 +127,7 @@ pub struct Glue {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlueKind {
+    TaskHandle,
     Trivial,
     Record(Vec<FieldGlue>),
     Array {

@@ -50,7 +50,7 @@ impl Context<'_> {
             }
             metadata.push((name.symbol, kind));
         }
-        let definition = &mut self.program.definitions[owner.0 as usize];
+        let definition = &mut self.program.definitions[owner];
         definition.type_parameter_count = metadata
             .iter()
             .filter(|(_, kind)| *kind == GenericParamKind::Type)

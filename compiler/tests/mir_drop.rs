@@ -51,7 +51,7 @@ impl<'a> Trace<'a> {
             .find(|body| {
                 compilation
                     .symbols
-                    .get(hir.definitions[body.definition.0 as usize].name)
+                    .get(hir.definitions[body.definition].name)
                     == name
             })
             .expect("named MIR body");
@@ -171,7 +171,7 @@ impl<'a> Trace<'a> {
                 let name = self
                     .compilation
                     .symbols
-                    .get(self.hir.definitions[definition.0 as usize].name);
+                    .get(self.hir.definitions[definition].name);
                 match self.failure.filter(|(target, _)| *target == name) {
                     Some((_, mir::ExitKind::Panic)) => 1,
                     Some((_, mir::ExitKind::Cancel)) => 2,
@@ -190,7 +190,7 @@ impl<'a> Trace<'a> {
             .position(|flag| flag.place == *place)
             .expect("owned drop path");
         assert!(!self.flags[flag], "flag must clear before invoking glue");
-        let local = &self.core.locals[place.local.0 as usize];
+        let local = &self.core.locals[place.local];
         let mut name = local.name.map_or_else(
             || format!("_{}", place.local.0),
             |name| self.compilation.symbols.get(name).to_owned(),

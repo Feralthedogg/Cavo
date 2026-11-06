@@ -232,6 +232,10 @@ impl<'a> Machine<'a> {
 
     fn statement(&mut self, statement: &mir::StatementKind) {
         match statement {
+            mir::StatementKind::RegistryStart(local) => {
+                self.values[local.0 as usize] = Some(Value::Unit)
+            }
+            mir::StatementKind::Contract(_) => {}
             mir::StatementKind::EnterScope(scope) => self.scopes.push(*scope),
             mir::StatementKind::ExitScope(scope) => assert_eq!(self.scopes.pop(), Some(*scope)),
             mir::StatementKind::StorageLive(local) => {
@@ -382,7 +386,7 @@ impl<'a> Machine<'a> {
         let name = self
             .compilation
             .symbols
-            .get(self.hir.definitions[definition.0 as usize].name);
+            .get(self.hir.definitions[definition].name);
         self.events.push(format!("call:{name}"));
         if let Some((_, reason)) = self.failure.filter(|(target, _)| *target == name) {
             return Some(reason);

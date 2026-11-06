@@ -1,4 +1,5 @@
 use super::*;
+use crate::arena::Access as _;
 use crate::types::{ConstKind, ConstValue};
 
 impl Builder<'_> {
@@ -34,6 +35,9 @@ impl Builder<'_> {
         for expression in &mut function.expressions {
             specialize_expression(&mut mapper, expression, &mut vtables)?;
         }
+        remap_task_scopes(&mut mapper, &mut function)?;
+        self.copy_modular_contract(source.definition, instance.definition);
+        self.instantiate_contract_signature(source, instance, mapping)?;
         for index in 0..source.expressions.len() {
             self.retarget_expression(source, &mut function, index)?;
         }
@@ -41,6 +45,18 @@ impl Builder<'_> {
             self.retarget_vtable(vtable, source.body.span)?;
         }
         Ok(function)
+    }
+
+    fn copy_modular_contract(&mut self, source: hir::DefId, destination: hir::DefId) {
+        if let Some(contract) = self.source.modular.functions.get(&source).cloned() {
+            self.program.modular.functions.insert(destination, contract);
+        }
+        if let Some(module) = self.source.modular.imported.get(&source).cloned() {
+            self.program.modular.imported.insert(destination, module);
+        }
+        if let Some(trust) = self.source.modular.assumptions.get(&source).cloned() {
+            self.program.modular.assumptions.insert(destination, trust);
+        }
     }
 
     fn retarget_expression(
@@ -51,7 +67,7 @@ impl Builder<'_> {
     ) -> Result<(), Error> {
         let original = &source.expressions[index];
         match &original.kind {
-            hir::ExprKind::Call { callee, .. } => {
+            hir::ExprKind::Call { callee, .. } | hir::ExprKind::Spawn { callee, .. } => {
                 let Some(definition) = direct_target(source, *callee) else {
                     return Ok(());
                 };
@@ -63,7 +79,7 @@ impl Builder<'_> {
                     .get(definition.0 as usize)
                     .is_some_and(Option::is_some) =>
             {
-                let declaration = &self.source.definitions[definition.0 as usize];
+                let declaration = &self.source.definitions[definition];
                 if declaration
                     .generic_parameter_kinds
                     .iter()
@@ -94,15 +110,20 @@ impl Builder<'_> {
     ) -> Result<(), Error> {
         let span = function.expressions[index].span;
         if matches!(
-            self.program.definitions[definition.0 as usize].kind,
+            self.program.definitions[definition].kind,
             hir::DefinitionKind::Variant { .. }
         ) {
             return Ok(());
         }
-        let hir::ExprKind::Call { type_arguments, .. } = &function.expressions[index].kind else {
+        let (hir::ExprKind::Call { type_arguments, .. }
+        | hir::ExprKind::Spawn { type_arguments, .. }) = &function.expressions[index].kind
+        else {
             unreachable!();
         };
         let mut arguments = type_arguments.clone();
+        if self.program.contracts.predicates.contains_key(&definition) {
+            return Ok(());
+        }
         if let Some(selected) = hir::traits::select_method(&self.program, definition, &arguments)
             .map_err(|error| problem(span, "E-MONO-METHOD", error.to_string()))?
         {
@@ -114,6 +135,10 @@ impl Builder<'_> {
             .get(definition.0 as usize)
             .is_none_or(Option::is_none)
         {
+            if self.program.contracts.intrinsics.contains_key(&definition) {
+                let specialized = self.specialize_intrinsic(definition, &arguments, span)?;
+                return self.replace_call_target(function, index, specialized, Vec::new());
+            }
             if arguments
                 .iter()
                 .any(|argument| !matches!(argument, GenericArg::Lifetime(_)))
@@ -131,6 +156,25 @@ impl Builder<'_> {
             arguments: arguments.clone(),
         })?;
         let definition = self.instances[target.0 as usize].definition;
+        self.replace_call_target(
+            function,
+            index,
+            definition,
+            arguments
+                .into_iter()
+                .filter(|argument| matches!(argument, GenericArg::Lifetime(_)))
+                .collect(),
+        )
+    }
+
+    fn replace_call_target(
+        &mut self,
+        function: &mut hir::Function,
+        index: usize,
+        definition: hir::DefId,
+        arguments: Vec<GenericArg>,
+    ) -> Result<(), Error> {
+        let span = function.expressions[index].span;
         let ty = self.function_value_type(definition, span)?;
         let callee = hir::ExprId(function.expressions.len() as u32);
         function.expressions.push(hir::Expr {
@@ -138,24 +182,79 @@ impl Builder<'_> {
             ty,
             span,
         });
-        let hir::ExprKind::Call {
-            callee: replaced,
-            type_arguments,
-            ..
-        } = &mut function.expressions[index].kind
+        match &mut function.expressions[index].kind {
+            hir::ExprKind::Call {
+                callee: target,
+                type_arguments,
+                ..
+            }
+            | hir::ExprKind::Spawn {
+                callee: target,
+                type_arguments,
+                ..
+            } => {
+                *target = callee;
+                *type_arguments = arguments;
+            }
+            _ => unreachable!("call target specialization"),
+        }
+        Ok(())
+    }
+
+    fn instantiate_contract_signature(
+        &mut self,
+        source: &hir::Function,
+        instance: &Instance,
+        mapping: &mut types::Mapping,
+    ) -> Result<(), Error> {
+        let Some(mut header) = self
+            .source
+            .contracts
+            .signatures
+            .get(&source.definition)
+            .cloned()
         else {
-            unreachable!();
+            return Ok(());
         };
-        *replaced = callee;
-        *type_arguments = arguments
-            .into_iter()
-            .filter(|argument| matches!(argument, GenericArg::Lifetime(_)))
-            .collect();
+        if header.clauses.is_empty() {
+            return Ok(());
+        }
+        let original = header.clone();
+        header.definition = instance.definition;
+        let mut mapper = types::Mapper::new(
+            &mut self.program,
+            types::Substitution {
+                owner: source.definition,
+                arguments: &instance.key.arguments,
+                destination: instance.definition,
+            },
+            self.options.constants,
+            mapping,
+        );
+        header.result = mapper
+            .ty(header.result)
+            .map_err(|message| problem(source.body.span, "E-MONO-CONTRACT", message))?;
+        for local in &mut header.locals {
+            local.ty = mapper
+                .ty(local.ty)
+                .map_err(|message| problem(local.span, "E-MONO-CONTRACT", message))?;
+        }
+        let mut tables = HashMap::new();
+        for expression in &mut header.expressions {
+            specialize_expression(&mut mapper, expression, &mut tables)?;
+        }
+        for index in 0..original.expressions.len() {
+            self.retarget_expression(&original, &mut header, index)?;
+        }
+        self.program
+            .contracts
+            .signatures
+            .insert(instance.definition, header);
         Ok(())
     }
 
     fn function_value_type(&mut self, definition: hir::DefId, span: Span) -> Result<TyId, Error> {
-        let ty = self.program.definitions[definition.0 as usize].ty;
+        let ty = self.program.definitions[definition].ty;
         self.program
             .types
             .generalize_callable(ty, definition)
@@ -188,7 +287,7 @@ impl Builder<'_> {
                 arguments: selected.type_arguments.clone(),
             })?;
             slot.implementation = self.instances[target.0 as usize].definition;
-            slot.signature = self.program.definitions[slot.implementation.0 as usize].ty;
+            slot.signature = self.program.definitions[slot.implementation].ty;
             slot.type_arguments = selected
                 .type_arguments
                 .into_iter()
@@ -215,8 +314,22 @@ fn specialize_expression(
     if !callable_definition {
         expression.ty = mapper.ty(expression.ty).map_err(map_error)?;
     }
+    if let hir::ExprKind::Spawn {
+        child_result,
+        capture_type,
+        ..
+    } = &mut expression.kind
+    {
+        *child_result = mapper.ty(*child_result).map_err(map_error)?;
+        *capture_type = mapper.ty(*capture_type).map_err(map_error)?;
+    }
     match &mut expression.kind {
         hir::ExprKind::Call {
+            type_arguments,
+            parameter_types,
+            ..
+        }
+        | hir::ExprKind::Spawn {
             type_arguments,
             parameter_types,
             ..
@@ -261,6 +374,44 @@ fn specialize_expression(
             *vtable = specialized_vtable(mapper, *vtable, vtables).map_err(map_error)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn remap_task_scopes(
+    mapper: &mut types::Mapper<'_, '_>,
+    function: &mut hir::Function,
+) -> Result<(), Error> {
+    let mut remapped = HashMap::new();
+    for statement in &mut function.statements {
+        if let hir::StmtKind::TaskScope { scope, .. } = &mut statement.kind {
+            let old = mapper.program.tasks.scopes[*scope as usize].clone();
+            let GenericArg::Lifetime(region) = mapper
+                .argument(GenericArg::Lifetime(old.region))
+                .map_err(|message| problem(statement.span, "E-MONO-TASK", message))?
+            else {
+                unreachable!("scope region");
+            };
+            let next = mapper.program.tasks.scopes.len() as u32;
+            mapper.program.tasks.scopes.push(crate::tasks::Scope {
+                owner: function.definition,
+                region,
+                span: old.span,
+            });
+            remapped.insert(*scope, next);
+            *scope = next;
+        }
+    }
+    for expression in &mut function.expressions {
+        if let hir::ExprKind::Spawn { scope, .. } = &mut expression.kind {
+            *scope = *remapped.get(scope).ok_or_else(|| {
+                problem(
+                    expression.span,
+                    "E-MONO-TASK",
+                    "spawn lost its owning scope",
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -323,7 +474,7 @@ fn constant(program: &hir::Program, value: crate::types::ConstId) -> Result<hir:
 }
 fn direct_target(function: &hir::Function, mut expression: hir::ExprId) -> Option<hir::DefId> {
     for _ in 0..128 {
-        match function.expressions.get(expression.0 as usize)?.kind {
+        match function.expressions.get_id(expression)?.kind {
             hir::ExprKind::Definition(definition) => return Some(definition),
             hir::ExprKind::Group(inner) => expression = inner,
             _ => return None,

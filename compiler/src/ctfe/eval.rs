@@ -208,7 +208,7 @@ impl<'a> Evaluator<'a> {
         Err(Error::new(
             "E-CONST-CONTRACT",
             message,
-            frame.expressions[expression.0 as usize].span,
+            frame.expressions[expression].span,
         ))
     }
     fn check_arguments(

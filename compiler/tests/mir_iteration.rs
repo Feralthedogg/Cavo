@@ -318,7 +318,7 @@ fn observes(source: &str, expected: i128, expected_calls: usize) {
         .find(|body| {
             compilation
                 .symbols
-                .get(hir.definitions[body.definition.0 as usize].name)
+                .get(hir.definitions[body.definition].name)
                 == "f"
         })
         .unwrap();

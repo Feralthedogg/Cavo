@@ -65,7 +65,7 @@ fn forward_constants_and_const_functions_supply_array_lengths() {
         .find(|function| {
             compilation
                 .symbols
-                .get(program.definitions[function.definition.0 as usize].name)
+                .get(program.definitions[function.definition].name)
                 == "f"
         })
         .unwrap();

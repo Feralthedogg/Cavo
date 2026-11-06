@@ -172,7 +172,10 @@ impl<'a> Builder<'a> {
     ) -> Result<Terminator, Error> {
         use super::super::Terminator as T;
         let successors = match kind {
-            T::Call { .. } | T::DynCall { .. } => self.call_edges(kind, output)?,
+            T::Call { .. } | T::DynCall { .. } | T::Spawn { .. } => {
+                self.call_edges(kind, output)?
+            }
+            T::TaskDrain { next, abort, .. } => vec![BlockId(next.0), BlockId(abort.0)],
             T::IteratorNext {
                 destination,
                 some,
@@ -237,6 +240,15 @@ impl<'a> Builder<'a> {
             }
             | T::DynCall {
                 receiver: callee,
+                arguments,
+                destination,
+                normal,
+                panic,
+                cancel,
+                ..
+            }
+            | T::Spawn {
+                callee,
                 arguments,
                 destination,
                 normal,

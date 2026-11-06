@@ -17,8 +17,10 @@ use crate::{
 };
 use std::collections::{BTreeSet, HashSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Effect {
+    MemoryWrite,
+    MemoryFree,
     Poll,
     AsyncPreempt,
     Park,
@@ -115,6 +117,14 @@ pub fn analyze(
     external: &[SummaryReport],
 ) -> Result<Report, InvariantError> {
     let targets = Targets {
+        declared: hir
+            .modular
+            .functions
+            .iter()
+            .filter(|(definition, _)| crate::modular::usable(hir, **definition))
+            .map(|(&definition, contract)| (definition, contract))
+            .collect(),
+        intrinsics: &hir.contracts.intrinsics,
         bodies: body_indices(mir, hir)?,
         external: external_index(external, hir.definitions.len())?,
         foreign: hir
@@ -131,6 +141,7 @@ pub fn analyze(
         calls.push(dependencies);
     }
     propagate(&calls, &mut summaries)?;
+    mark_recursive_bodies(mir, &targets, &mut summaries);
     let mut violations = check_bounds(hir, symbols, &summaries);
     violations.extend(check_cleanup_calls(mir, hir, &targets, &summaries));
     Ok(Report {
@@ -158,6 +169,34 @@ fn body_indices(mir: &Program, hir: &hir::Program) -> Result<Vec<Option<usize>>,
     Ok(indices)
 }
 
+fn mark_recursive_bodies(mir: &Program, targets: &Targets<'_>, summaries: &mut [FunctionEffects]) {
+    // A bounded declaration is a call-site promise, never evidence that its own
+    // recursive implementation terminates. Keep recursion independent of it.
+    let edges: Vec<Vec<usize>> = mir
+        .functions
+        .iter()
+        .map(|body| {
+            body.blocks
+                .iter()
+                .filter_map(|block| match &block.terminator {
+                    Terminator::Call {
+                        callee: Operand::Function { definition, .. },
+                        ..
+                    } => targets.bodies.get(definition.0 as usize).copied().flatten(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    for component in graph::components(&edges) {
+        if component.len() > 1 || edges[component[0]].contains(&component[0]) {
+            for node in component {
+                summaries[node].bounded = Boundedness::MayDiverge;
+            }
+        }
+    }
+}
+
 fn external_index(
     reports: &[SummaryReport],
     count: usize,
@@ -178,6 +217,8 @@ fn external_index(
 }
 
 struct Targets<'a> {
+    declared: std::collections::BTreeMap<hir::DefId, &'a crate::modular::Contract>,
+    intrinsics: &'a std::collections::BTreeMap<hir::DefId, crate::contracts::Intrinsic>,
     bodies: Vec<Option<usize>>,
     external: Vec<Option<&'a SummaryReport>>,
     foreign: Vec<bool>,
@@ -201,7 +242,19 @@ fn scan_body(
         if !reachable[index] {
             continue;
         }
+        if block.statements.iter().any(|statement| matches!(&statement.kind,
+            super::StatementKind::Assign { destination, .. } if destination.projection.contains(&super::Projection::Deref))) {
+            summary.effects.insert(Effect::MemoryWrite);
+        }
         match &block.terminator {
+            Terminator::Spawn { .. } => {
+                summary
+                    .effects
+                    .extend([Effect::Allocate, Effect::AsyncPreempt, Effect::Cancel]);
+            }
+            Terminator::TaskDrain { .. } => {
+                summary.effects.insert(Effect::Park);
+            }
             Terminator::Call { callee, .. } => {
                 scan_call(callee, targets, &mut summary, &mut dependencies)?;
             }
@@ -249,6 +302,17 @@ fn scan_call(
         return Ok(());
     };
     let index = definition.0 as usize;
+    if let Some(&role) = targets.intrinsics.get(definition) {
+        intrinsic_effects(role, summary);
+        return Ok(());
+    }
+    if let Some(contract) = targets.declared.get(definition) {
+        summary.effects.extend(&contract.upper);
+        if !contract.bounded {
+            summary.bounded = summary.bounded.max(Boundedness::Unknown);
+        }
+        return Ok(());
+    }
     let target = targets
         .bodies
         .get(index)
@@ -269,6 +333,31 @@ fn scan_call(
     Ok(())
 }
 
+fn intrinsic_effects(role: crate::contracts::Intrinsic, summary: &mut FunctionEffects) {
+    use crate::contracts::Intrinsic as I;
+    match role {
+        I::Allocate => {
+            summary.effects.insert(Effect::Allocate);
+            summary.may_abort = true;
+        }
+        I::TaskJoin => {
+            summary.effects.extend([Effect::Park, Effect::Cancel]);
+        }
+        I::Deallocate => {
+            summary.effects.insert(Effect::MemoryFree);
+            summary.may_abort = true;
+        }
+        I::Take | I::Initialize | I::Replace | I::WriteUnaligned => {
+            summary.effects.insert(Effect::MemoryWrite);
+            summary.may_abort = true;
+        }
+        I::Read | I::ReadUnaligned => {
+            summary.may_abort = true;
+        }
+        _ => {}
+    }
+}
+
 fn scan_dynamic(
     receiver: &Operand,
     method: hir::DefId,
@@ -278,6 +367,13 @@ fn scan_dynamic(
     summary: &mut FunctionEffects,
     dependencies: &mut BTreeSet<usize>,
 ) -> Result<(), InvariantError> {
+    if targets.declared.contains_key(&method) {
+        let callee = Operand::Function {
+            definition: method,
+            ty: hir.definitions[method].ty,
+        };
+        return scan_call(&callee, targets, summary, dependencies);
+    }
     let Some(implementations) =
         witnesses.and_then(|witnesses| witnesses.targets(receiver, method, hir))
     else {
@@ -288,7 +384,7 @@ fn scan_dynamic(
     for definition in implementations {
         let operand = Operand::Function {
             definition,
-            ty: hir.definitions[definition.0 as usize].ty,
+            ty: hir.definitions[definition].ty,
         };
         scan_call(&operand, targets, summary, dependencies)?;
     }
@@ -373,6 +469,13 @@ fn cfg_edges(body: &Body) -> Result<Vec<Vec<usize>>, InvariantError> {
 
 fn successors(terminator: &Terminator) -> Vec<BlockId> {
     match terminator {
+        Terminator::Spawn {
+            normal,
+            panic,
+            cancel,
+            ..
+        } => vec![*normal, *panic, *cancel],
+        Terminator::TaskDrain { next, abort, .. } => vec![*next, *abort],
         Terminator::Goto(target) => vec![*target],
         Terminator::IteratorNext { some, none, .. } => vec![*some, *none],
         Terminator::Switch { condition, yes, no } => match condition {
@@ -483,7 +586,20 @@ fn check_bounds(
 ) -> Vec<EffectViolation> {
     let mut violations = Vec::new();
     for summary in summaries {
-        let definition = &hir.definitions[summary.definition.0 as usize];
+        let definition = &hir.definitions[summary.definition];
+        if let Some(contract) = hir.modular.functions.get(&summary.definition) {
+            if !summary.effects.is_subset(&contract.upper)
+                || contract.bounded && summary.bounded != Boundedness::Established
+                || !summary.unknown.is_empty() && contract.upper != all_effects()
+            {
+                violations.push(violation(
+                    summary.definition,
+                    definition.span,
+                    "implementation effects do not refine the declaration contract".into(),
+                ));
+            }
+            continue;
+        }
         for attribute in &definition.attributes {
             let name = symbols.get(attribute.name);
             let forbidden = match attribute_bound(name, attribute, symbols) {
@@ -543,6 +659,9 @@ fn check_cleanup_calls(
             };
             let established = methods.is_some_and(|methods| {
                 methods.into_iter().all(|definition| {
+                    if let Some(contract) = targets.declared.get(&definition) {
+                        return contract.cleanup_safe();
+                    }
                     targets
                         .bodies
                         .get(definition.0 as usize)
@@ -615,8 +734,10 @@ fn effect_named(name: &str) -> Option<Effect> {
     })
 }
 
-fn all_effects() -> BTreeSet<Effect> {
+pub(crate) fn all_effects() -> BTreeSet<Effect> {
     BTreeSet::from([
+        Effect::MemoryWrite,
+        Effect::MemoryFree,
         Effect::Poll,
         Effect::AsyncPreempt,
         Effect::Park,

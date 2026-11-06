@@ -169,7 +169,7 @@ pub(crate) fn validate_destructors(program: &mut hir::Program, diagnostics: &mut
                 Diagnostic::error(
                     "E-DROP-EFFECT",
                     error.to_string(),
-                    program.definitions[drop.0 as usize].span,
+                    program.definitions[drop].span,
                 ),
             );
             return;
@@ -182,7 +182,7 @@ pub(crate) fn validate_destructors(program: &mut hir::Program, diagnostics: &mut
                 Diagnostic::error(
                     "E-DROP-EFFECT",
                     "destructor requires established bounded nosuspend, nocancel, nopanic and noalloc effects",
-                    program.definitions[method.0 as usize].span,
+                    program.definitions[method].span,
                 ),
             );
         }

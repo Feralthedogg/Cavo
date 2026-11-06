@@ -2,13 +2,13 @@ use super::*;
 use crate::types::{Region, TyId};
 
 #[derive(Clone, Debug)]
-pub(in crate::mir::borrow) enum Storage {
+pub(crate) enum Storage {
     Parameter { parameter: u32, path: Vec<Step> },
     Pointee { input: u32, path: Vec<Step> },
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::mir::borrow) struct Input {
+pub(crate) struct Input {
     pub parameter: u32,
     pub path: Vec<Step>,
     pub storage: Storage,
@@ -25,14 +25,14 @@ struct Position {
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::mir::borrow) struct Requirement {
+pub(crate) struct Requirement {
     pub path: Vec<Step>,
     pub region: Region,
     pub invariant: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::mir::borrow) struct Frame {
+pub(crate) struct Frame {
     pub inputs: Vec<Input>,
     pub result: Vec<Requirement>,
     pub stores: Vec<Vec<Requirement>>,
@@ -52,8 +52,7 @@ impl Frame {
             relations: Vec::new(),
             complete: true,
         };
-        let Ty::Function { parameters, result } =
-            hir.types.get(hir.definitions[definition.0 as usize].ty)
+        let Ty::Function { parameters, result } = hir.types.get(hir.definitions[definition].ty)
         else {
             frame.complete = false;
             return frame;

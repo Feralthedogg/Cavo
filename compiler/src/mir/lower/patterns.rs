@@ -24,9 +24,7 @@ impl Builder<'_> {
         self.assign(Place::local(owner), Rvalue::Use(value), span);
         let mut place = Place::local(owner);
         if matches!(
-            self.program
-                .types
-                .get(self.source.expressions[subject.0 as usize].ty),
+            self.program.types.get(self.source.expressions[subject].ty),
             Ty::Reference { .. }
         ) {
             place = place.project(Projection::Deref);
@@ -154,7 +152,7 @@ impl Builder<'_> {
 
     fn preview_bindings(&mut self, bindings: &mut [Binding]) -> Result<(), LowerError> {
         for binding in bindings {
-            let ty = self.source.locals[binding.local.0 as usize].ty;
+            let ty = self.source.locals[binding.local].ty;
             if binding.mode == BindingMode::Move {
                 // Freeze the tested payload address, not its value. Guard calls
                 // cannot cause us to re-evaluate an index or stale discriminant.
@@ -183,7 +181,7 @@ impl Builder<'_> {
         next: BlockId,
         depth: usize,
     ) -> Result<(), LowerError> {
-        let span = self.source.expressions[guard.0 as usize].span;
+        let span = self.source.expressions[guard].span;
         self.enter(span)?;
         let condition = self.eval(guard)?;
         let committed = self.new_block(span, None)?;

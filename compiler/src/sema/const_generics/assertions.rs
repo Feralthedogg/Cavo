@@ -82,7 +82,7 @@ fn assertion_instances(
                 &mut seen,
                 *definition,
                 arguments,
-                program.definitions[definition.0 as usize].span,
+                program.definitions[definition].span,
             );
         }
     }
@@ -124,7 +124,7 @@ fn register(
 
 fn direct_callee(function: &hir::Function, mut expression: hir::ExprId) -> Option<DefId> {
     for _ in 0..128 {
-        match function.expressions[expression.0 as usize].kind {
+        match function.expressions[expression].kind {
             hir::ExprKind::Definition(definition) => return Some(definition),
             hir::ExprKind::Group(inner) => expression = inner,
             _ => return None,

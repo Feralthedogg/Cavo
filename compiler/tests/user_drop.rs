@@ -18,7 +18,7 @@ fn user_destructors_are_registered_by_role_and_have_real_bodies() {
         .check_mir()
         .unwrap_or_else(|| panic!("{:#?}", compilation.diagnostics));
     let owned = program.records[0].definition;
-    let ty = program.definitions[owned.0 as usize].ty;
+    let ty = program.definitions[owned].ty;
     let selected = hir::traits::select_drop(&program, ty).unwrap().unwrap();
     hir::traits::check_bounds(&mut program, selected.definition, &selected.type_arguments).unwrap();
     assert!(

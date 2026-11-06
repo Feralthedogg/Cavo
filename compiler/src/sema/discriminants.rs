@@ -101,11 +101,11 @@ pub(crate) fn enum_discriminants(
             ctfe::Error::new(
                 "E-ENUM-DISCRIMINANT",
                 "missing enum declaration",
-                program.definitions[owner.0 as usize].span,
+                program.definitions[owner].span,
             )
         })?;
     let terms = declaration.discriminants.clone();
-    let span = program.definitions[owner.0 as usize].span;
+    let span = program.definitions[owner].span;
     let mut values = Vec::with_capacity(terms.len());
     let mut seen = HashSet::new();
     for term in terms {

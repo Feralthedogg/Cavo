@@ -1,6 +1,9 @@
 use super::*;
 
 struct Snapshot {
+    parameters: Vec<Value>,
+    pointees: Vec<Value>,
+    paths: Vec<(u32, Vec<Key>)>,
     values: Vec<Value>,
     targets: Vec<Resolved>,
     fallback: Loans,
@@ -21,26 +24,59 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
         mut state: State,
     ) -> Vec<(BlockId, State)> {
         let call = self.invocation(terminator, &mut state);
+        if call.targets.len() == 1
+            && !call.unknown
+            && let Some(&role) = call
+                .targets
+                .first()
+                .and_then(|definition| self.context.hir.contracts.intrinsics.get(definition))
+        {
+            return match role {
+                crate::contracts::Intrinsic::TaskJoin
+                | crate::contracts::Intrinsic::TaskIgnore
+                | crate::contracts::Intrinsic::TaskCancel => {
+                    self.task_operation(role, &call.arguments, call.destination, call.exits, state)
+                }
+                _ => self.memory_intrinsic(
+                    role,
+                    &call.arguments,
+                    call.destination,
+                    call.exits[0],
+                    state,
+                ),
+            };
+        }
         if call.targets.is_empty() || call.unknown {
             return self.unknown_call(&call, state);
         }
+        self.known_call(&call, state)
+    }
+
+    fn known_call(&mut self, call: &Invocation<'_>, state: State) -> Vec<(BlockId, State)> {
         let mut edges = Vec::new();
         for &definition in &call.targets {
-            let Some(summary) = &self.context.summaries.functions[definition.0 as usize] else {
-                edges.extend(self.unknown_call(&call, state.clone()));
+            let declared = self.context.hir.modular.functions.contains_key(&definition)
+                && crate::modular::usable(self.context.hir, definition);
+            let summary = if declared {
+                &self.context.summaries.declared[definition.0 as usize]
+            } else {
+                &self.context.summaries.functions[definition.0 as usize]
+            };
+            let Some(summary) = summary.as_ref() else {
+                edges.extend(self.unknown_call(call, state.clone()));
                 continue;
             };
             for &assumption in &summary.assumptions {
                 self.reporter.assumption(assumption);
             }
             if summary.limited {
-                edges.extend(self.unknown_call(&call, state.clone()));
+                edges.extend(self.unknown_call(call, state.clone()));
                 continue;
             }
             if !summary.complete {
                 self.gap(GapKind::CallReferenceEffects);
                 if summary.normal.is_none() && summary.panic.is_none() && summary.cancel.is_none() {
-                    edges.extend(self.unknown_call(&call, state.clone()));
+                    edges.extend(self.unknown_call(call, state.clone()));
                     continue;
                 }
             }
@@ -126,18 +162,22 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
         state: &mut State,
     ) -> (Value, BTreeSet<hir::DefId>) {
         let receiver = self.consume(receiver, state);
-        let targets = receiver
-            .vtables
-            .iter()
-            .flat_map(|&vtable| &self.context.hir.vtables[vtable as usize].slots)
-            .filter(|slot| slot.declaration == method)
-            .map(|slot| slot.implementation)
-            .collect();
+        let targets = if self.context.hir.modular.functions.contains_key(&method) {
+            BTreeSet::from([method])
+        } else {
+            receiver
+                .vtables
+                .iter()
+                .flat_map(|&vtable| &self.context.hir.vtables[vtable as usize].slots)
+                .filter(|slot| slot.declaration == method)
+                .map(|slot| slot.implementation)
+                .collect()
+        };
         if let Ty::Function { parameters, .. } = self
             .context
             .hir
             .types
-            .get(self.context.hir.definitions[method.0 as usize].ty)
+            .get(self.context.hir.definitions[method].ty)
             && let Some(&ty) = parameters.first()
         {
             self.static_constraints(&receiver, ty, state, 0);
@@ -213,6 +253,18 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
         state: &State,
     ) -> Snapshot {
         let mut snapshot = Snapshot {
+            parameters: arguments.to_vec(),
+            pointees: Vec::with_capacity(frame.inputs.len()),
+            paths: frame
+                .inputs
+                .iter()
+                .map(|input| {
+                    (
+                        input.parameter,
+                        input.path.iter().copied().chain([Key::Deref]).collect(),
+                    )
+                })
+                .collect(),
             values: Vec::with_capacity(frame.inputs.len()),
             targets: Vec::with_capacity(frame.inputs.len()),
             fallback: self.return_fallback(definition, arguments, state),
@@ -241,6 +293,13 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
             // reference as well. A shared outer reference stays read-only.
             target.via.extend(inherited.via);
             target.permissions.extend(inherited.permissions);
+            let inner = match self.context.hir.types.get(input.ty) {
+                Ty::Reference { inner, .. } => *inner,
+                _ => TyId::ERROR,
+            };
+            snapshot
+                .pointees
+                .push(self.read_value(&target, inner, state));
             snapshot.values.push(value);
             snapshot.targets.push(target);
         }
@@ -257,7 +316,7 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
             .context
             .hir
             .types
-            .get(self.context.hir.definitions[definition.0 as usize].ty)
+            .get(self.context.hir.definitions[definition].ty)
         else {
             return arguments.iter().flat_map(Value::loans).collect();
         };
@@ -286,8 +345,9 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
             if matches!(self.context.hir.types.get(ty), Ty::Parameter { .. }) {
                 parameters.insert(ty);
             } else {
-                // A concrete reference can point at an entire argument. An
-                // opaque T, however, can only carry loans from an input T value.
+                // A concrete reference can point at an entire argument. For
+                // opaque values, trace the contained value rather than the
+                // borrow used to reach an enclosing closure environment.
                 pending.extend(
                     summary::children(ty, self.context.hir, self.context.properties)?
                         .into_iter()
@@ -443,16 +503,24 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
             .iter()
             .map(|write| {
                 let target = footprint(&write.target, snapshot);
-                (
-                    target,
-                    write.definite,
-                    instantiate(
-                        &write.value,
-                        snapshot,
-                        slots,
-                        self.context.sites.static_loan,
-                    ),
-                )
+                let mut value = instantiate(
+                    &write.value,
+                    snapshot,
+                    slots,
+                    self.context.sites.static_loan,
+                );
+                if value.unknown
+                    && target.locations.iter().any(|location| {
+                        self.context
+                            .properties
+                            .get(self.location_type(location))
+                            .references
+                    })
+                {
+                    let fallback = self.storable_loans(&snapshot.parameters, &target, state);
+                    value.fields.entry(Vec::new()).or_default().extend(fallback);
+                }
+                (target, write.definite, value)
             })
             .collect();
         for (target, definite, value) in writes {
@@ -510,23 +578,133 @@ impl<R: Reporter> Evaluator<'_, '_, R> {
 
     fn unknown_call(&mut self, call: &Invocation<'_>, mut state: State) -> Vec<(BlockId, State)> {
         self.gap(GapKind::CallReferenceEffects);
-        for value in &call.arguments {
-            let target = self.value_target(value, &state);
-            for location in target.locations {
-                match location.root {
-                    Root::Local(local) => state.values[local as usize].unknown = true,
-                    Root::External(input) => state.memory[input as usize].unknown = true,
-                    Root::Static => {}
-                }
-            }
-        }
+        self.clobber_inputs(&call.arguments, &mut state);
         let failure = state.clone();
-        let normal_state = self.clobber_return(call.destination, state);
+        let mut normal_state = self.clobber_return(call.destination, state);
+        if self
+            .context
+            .properties
+            .get(self.place_type(call.destination))
+            .references
+        {
+            let target = self.resolve(call.destination, &normal_state);
+            let mut value = Value::unknown();
+            value.fields.insert(
+                Vec::new(),
+                call.arguments.iter().flat_map(Value::loans).collect(),
+            );
+            self.store(&target, value, &mut normal_state);
+        }
         vec![
             (call.exits[0], normal_state),
             (call.exits[1], failure.clone()),
             (call.exits[2], failure),
         ]
+    }
+
+    fn clobber_inputs(&self, arguments: &[Value], state: &mut State) {
+        for value in arguments {
+            let target = self.value_target(value, state);
+            if !target.unknown
+                && target
+                    .permissions
+                    .iter()
+                    .any(|loan| !self.context.loans[loan.0 as usize].mutable)
+            {
+                continue;
+            }
+            for location in target.locations {
+                let references = self
+                    .context
+                    .properties
+                    .get(self.location_type(&location))
+                    .references;
+                let stored = self.storable_loans(
+                    arguments,
+                    &Resolved {
+                        locations: Locations::from([location.clone()]),
+                        ..Resolved::default()
+                    },
+                    state,
+                );
+                let value = match location.root {
+                    Root::Local(local) => &mut state.values[local as usize],
+                    Root::External(input) => &mut state.memory[input as usize],
+                    Root::Static => continue,
+                };
+                value.unknown = true;
+                value.parameters.clear();
+                value.functions.clear();
+                value.vtables.clear();
+                if references {
+                    value.fields.entry(Vec::new()).or_default().extend(stored);
+                }
+            }
+        }
+    }
+
+    fn location_type(&self, location: &Location) -> TyId {
+        let mut ty = match location.root {
+            Root::Local(local) => self.context.body.locals[local as usize].ty,
+            Root::External(input) => {
+                let frame = self.context.summaries.frames[self.context.body.definition.0 as usize]
+                    .as_ref()
+                    .expect("body frame");
+                match self.context.hir.types.get(frame.inputs[input as usize].ty) {
+                    Ty::Reference { inner, .. } => *inner,
+                    _ => TyId::ERROR,
+                }
+            }
+            Root::Static => return TyId::ERROR,
+        };
+        let mut variant = None;
+        for step in &location.path {
+            ty = match step {
+                Key::Variant(id) => {
+                    variant = Some(*id);
+                    ty
+                }
+                Key::Deref => match self.context.hir.types.get(ty) {
+                    Ty::Reference { inner, .. } | Ty::Pointer { inner, .. } => *inner,
+                    _ => TyId::ERROR,
+                },
+                Key::Element => match self.context.hir.types.get(ty) {
+                    Ty::Array { inner, .. }
+                    | Ty::SymbolicArray { inner, .. }
+                    | Ty::Slice(inner) => *inner,
+                    _ => TyId::ERROR,
+                },
+                Key::Field(field) => {
+                    let fields = if let Some(id) = variant.take() {
+                        self.context.properties.variant_fields(ty, id)
+                    } else {
+                        self.context.properties.fields(ty)
+                    };
+                    fields
+                        .and_then(|f| f.get(*field as usize))
+                        .copied()
+                        .unwrap_or(TyId::ERROR)
+                }
+            };
+        }
+        ty
+    }
+
+    fn storable_loans(&self, arguments: &[Value], target: &Resolved, state: &State) -> Loans {
+        arguments
+            .iter()
+            .flat_map(Value::loans)
+            .filter(|loan| {
+                // Safe code cannot store the exclusive receiver loan into its own
+                // referent. Keep other origins, including references inside it.
+                !state.loans[loan.0 as usize].targets.iter().any(|source| {
+                    target
+                        .locations
+                        .iter()
+                        .any(|destination| overlap(source, destination))
+                })
+            })
+            .collect()
     }
 
     fn clobber_return(&mut self, destination: &Place, mut state: State) -> State {
@@ -580,6 +758,11 @@ fn instantiate(
         vtables: template.vtables.clone(),
         ..Value::default()
     };
+    for (path, parameters) in &template.parameters {
+        for parameter in parameters {
+            value.insert(path, parameter_value(parameter, snapshot));
+        }
+    }
     for (path, origins) in &template.fields {
         for &origin in origins {
             value
@@ -596,4 +779,26 @@ fn instantiate(
         }
     }
     value
+}
+
+fn parameter_value(source: &summary::ParameterOrigin, snapshot: &Snapshot) -> Value {
+    let input = snapshot
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(_, (parameter, prefix))| {
+            *parameter == source.parameter && source.path.starts_with(prefix)
+        })
+        .max_by_key(|(_, (_, prefix))| prefix.len());
+    if let Some((index, (_, prefix))) = input {
+        return snapshot.pointees[index].project(&source.path[prefix.len()..]);
+    }
+    if source.path.contains(&Key::Deref) {
+        return Value::unknown();
+    }
+    snapshot
+        .parameters
+        .get(source.parameter as usize)
+        .map(|value| value.project(&source.path))
+        .unwrap_or_else(Value::unknown)
 }

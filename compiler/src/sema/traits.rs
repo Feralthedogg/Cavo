@@ -80,6 +80,9 @@ impl Context<'_> {
     }
 
     fn copy_nominal_fields(&mut self, ty: TyId) -> Option<Vec<TyId>> {
+        if crate::tasks::task_arguments(&self.program, ty).is_some() {
+            return None;
+        }
         if model::has_drop(&self.program, ty) {
             return None;
         }

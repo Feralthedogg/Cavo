@@ -12,6 +12,9 @@ use std::fmt::Write;
 
 #[derive(Debug)]
 pub struct Analysis {
+    pub modular: crate::modular::Report,
+    pub tasks: crate::tasks::Report,
+    pub contracts: crate::contracts::Report,
     pub borrows: borrow::Report,
     pub effects: effects::Report,
     pub drops: drop::Program,
@@ -27,6 +30,7 @@ pub(crate) fn analyze(
     hir: &mut hir::Program,
     symbols: &Interner,
     external: &[SummaryReport],
+    sources: &crate::source::SourceMap,
 ) -> Result<Analysis, AnalysisError> {
     let effects = effects::analyze(mir, hir, symbols, external).map_err(|error| AnalysisError {
         code: "E-MIR-EFFECT",
@@ -41,7 +45,25 @@ pub(crate) fn analyze(
         code: "E-MIR-DROP",
         message: error.to_string(),
     })?;
+    let tasks =
+        crate::tasks::analyze(mir, hir, symbols, &effects.functions).map_err(|message| {
+            AnalysisError {
+                code: "E-TASK-LIMIT",
+                message,
+            }
+        })?;
+    let modular = crate::modular::analyze(mir, hir, &borrows, &effects);
+    let contracts =
+        crate::contracts::analyze(mir, hir, symbols, sources, external).map_err(|message| {
+            AnalysisError {
+                code: "E-CONTRACT-LIMIT",
+                message,
+            }
+        })?;
     Ok(Analysis {
+        modular,
+        tasks,
+        contracts,
         borrows,
         effects,
         drops,
@@ -50,6 +72,9 @@ pub(crate) fn analyze(
 
 impl Analysis {
     pub(crate) fn diagnostics(&self, output: &mut Vec<Diagnostic>) {
+        output.extend(self.modular.diagnostics.iter().cloned());
+        output.extend(self.tasks.diagnostics.iter().cloned());
+        self.contracts.diagnostics(output);
         for function in &self.borrows.functions {
             for finding in &function.findings {
                 report(
@@ -69,6 +94,8 @@ impl Analysis {
     /// Inspection only: the reports must be recomputed after MIR changes.
     pub fn dump(&self) -> String {
         let mut output = self.borrows.dump();
+        output.push_str(&self.contracts.dump());
+        output.push_str(&self.tasks.dump());
         output.push_str("\nMIR effects / before runtime and checkpoint lowering\n");
         for function in &self.effects.functions {
             let _ = writeln!(

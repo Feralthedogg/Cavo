@@ -8,7 +8,7 @@ impl Builder<'_> {
         body: &hir::Block,
         span: Span,
     ) -> Result<(), LowerError> {
-        let ty = self.source.expressions[iterable.0 as usize].ty;
+        let ty = self.source.expressions[iterable].ty;
         if !matches!(
             self.program.types.get(ty),
             Ty::Array { .. } | Ty::SymbolicArray { .. }

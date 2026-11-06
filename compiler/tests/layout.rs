@@ -81,7 +81,7 @@ fn pointer_layout_does_not_follow_recursive_pointees_and_slices_are_wide() {
         typed("struct Node { ptr<Node> next; } void f(&[i32] values) {}");
     let slice = parameter(&program);
     let node = program.records[0].definition;
-    let node = program.definitions[node.0 as usize].ty;
+    let node = program.definitions[node].ty;
     let table = layouts(&compilation, &mut program, &[slice, node]);
     assert_eq!(table.get(slice).unwrap().size, 16);
     assert_eq!(table.get(node).unwrap().size, 8);
@@ -145,7 +145,7 @@ fn unresolved_types_bad_alignment_and_unsized_values_fail_closed() {
         let ty = parameter(&program);
         let owner = program.records[0].definition;
         let value = program.types.const_value(alignment);
-        program.definitions[owner.0 as usize].attributes[0].constant = Some(value);
+        program.definitions[owner].attributes[0].constant = Some(value);
         assert!(
             layout::compute(
                 &mut program,
@@ -188,8 +188,8 @@ fn union_fields_overlay_and_packed_records_preserve_declared_order() {
     );
     let union = program.records[0].definition;
     // The storage query can describe a union without granting raw field access.
-    program.definitions[union.0 as usize].kind = hir::DefinitionKind::Union;
-    let union = program.definitions[union.0 as usize].ty;
+    program.definitions[union].kind = hir::DefinitionKind::Union;
+    let union = program.definitions[union].ty;
     let packed = parameter(&program);
     let table = layouts(&compilation, &mut program, &[union, packed]);
     let overlay = table.get(union).unwrap();

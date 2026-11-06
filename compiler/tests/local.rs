@@ -607,12 +607,10 @@ fn shared_expression_dags_are_bounded_without_approving_an_unfinished_result() {
     let (_, mut program) = passes("i32 f(i32 value) { return value; }");
     let function = &mut program.functions[0];
     let statement = function.body.statements[0];
-    let hir::StmtKind::Return(Some(mut expression)) =
-        function.statements[statement.0 as usize].kind
-    else {
+    let hir::StmtKind::Return(Some(mut expression)) = function.statements[statement].kind else {
         panic!()
     };
-    let span = function.expressions[expression.0 as usize].span;
+    let span = function.expressions[expression].span;
     for _ in 0..20 {
         let next = hir::ExprId(function.expressions.len() as u32);
         function.expressions.push(hir::Expr {
@@ -626,7 +624,7 @@ fn shared_expression_dags_are_bounded_without_approving_an_unfinished_result() {
         });
         expression = next;
     }
-    function.statements[statement.0 as usize].kind = hir::StmtKind::Return(Some(expression));
+    function.statements[statement].kind = hir::StmtKind::Return(Some(expression));
     program.validate().unwrap();
     let mut diagnostics = Vec::new();
     let report = local::analyze(&mut program, &mut diagnostics);
@@ -694,11 +692,10 @@ fn deeply_nested_transformed_conditions_and_statements_are_bounded() {
     let (_, mut program) = passes("void f() { if (true) {} }");
     let function = &mut program.functions[0];
     let statement = function.body.statements[0];
-    let hir::StmtKind::If { mut condition, .. } = function.statements[statement.0 as usize].kind
-    else {
+    let hir::StmtKind::If { mut condition, .. } = function.statements[statement].kind else {
         panic!()
     };
-    let span = function.expressions[condition.0 as usize].span;
+    let span = function.expressions[condition].span;
     for _ in 0..4096 {
         let next = hir::ExprId(function.expressions.len() as u32);
         function.expressions.push(hir::Expr {
@@ -710,7 +707,7 @@ fn deeply_nested_transformed_conditions_and_statements_are_bounded() {
     }
     if let hir::StmtKind::If {
         condition: current, ..
-    } = &mut function.statements[statement.0 as usize].kind
+    } = &mut function.statements[statement].kind
     {
         *current = condition;
     }

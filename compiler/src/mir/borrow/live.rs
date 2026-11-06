@@ -1,7 +1,7 @@
 use super::*;
 
-pub(super) type Live = BTreeSet<usize>;
-pub(super) struct Liveness {
+pub(crate) type Live = BTreeSet<usize>;
+pub(crate) struct Liveness {
     pub before: Vec<Vec<Live>>,
 }
 
@@ -69,8 +69,15 @@ fn predecessors(body: &Body) -> Vec<Vec<usize>> {
     incoming
 }
 
-pub(super) fn successors(terminator: &Terminator) -> Vec<BlockId> {
+pub(crate) fn successors(terminator: &Terminator) -> Vec<BlockId> {
     match terminator {
+        Terminator::Spawn {
+            normal,
+            panic,
+            cancel,
+            ..
+        } => vec![*normal, *panic, *cancel],
+        Terminator::TaskDrain { next, abort, .. } => vec![*next, *abort],
         Terminator::Goto(next) => vec![*next],
         Terminator::IteratorNext { some, none, .. } => vec![*some, *none],
         Terminator::Switch {
@@ -130,6 +137,12 @@ fn terminator(body: &Body, index: usize, inputs: &[Live], properties: &Propertie
             destination,
             ..
         }
+        | Terminator::Spawn {
+            callee,
+            arguments,
+            destination,
+            ..
+        }
         | Terminator::DynCall {
             receiver: callee,
             arguments,
@@ -161,6 +174,9 @@ fn terminator(body: &Body, index: usize, inputs: &[Live], properties: &Propertie
         Terminator::Return => {
             live.insert(body.return_local.0 as usize);
         }
+        Terminator::TaskDrain { registry, .. } => {
+            live.insert(registry.0 as usize);
+        }
         _ => {}
     }
     live
@@ -174,6 +190,11 @@ fn kill_result(exit: &Terminator, successor: BlockId, live: &mut Live) {
             ..
         }
         | Terminator::Call {
+            destination,
+            normal,
+            ..
+        }
+        | Terminator::Spawn {
             destination,
             normal,
             ..
@@ -200,6 +221,14 @@ fn kill(place: &Place, live: &mut Live) {
 
 fn statement_before(statement: &StatementKind, live: &mut Live) {
     match statement {
+        StatementKind::RegistryStart(local) => {
+            live.remove(&(local.0 as usize));
+        }
+        StatementKind::Contract(contract) => {
+            for argument in &contract.atom.arguments {
+                operand_uses(argument, live);
+            }
+        }
         StatementKind::StorageLive(local)
         | StatementKind::StorageDead(local)
         | StatementKind::Argument(local) => {

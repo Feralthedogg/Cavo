@@ -98,7 +98,7 @@ fn a_static_only_callback_is_not_universally_callable() {
 fn external_function_values_cannot_masquerade_as_managed_callbacks() {
     fails(
         "extern \"C\" { i32 native(i32 x); } void run(fn(i32) -> i32 callback) {} void f() { run(native); }",
-        "E-FRONTEND-STAGE",
+        "E-CALLABLE-IDENTITY",
     );
 }
 

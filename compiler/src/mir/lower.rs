@@ -9,6 +9,8 @@ use std::collections::HashMap;
 mod contracts;
 mod deferred;
 mod dynamic;
+mod logical;
+mod task_scopes;
 
 mod iteration;
 mod owned_iteration;
@@ -65,6 +67,7 @@ pub fn lower(program: &mut hir::Program) -> Result<Program, LowerError> {
 struct ActiveScope {
     id: ScopeId,
     registrations: Vec<Registration>,
+    task: Option<(u32, LocalId)>,
 }
 #[derive(Clone, Copy)]
 enum Registration {
@@ -79,6 +82,7 @@ struct Loop {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Cleanup {
+    TaskDrain(ScopeId, LocalId, super::tasks::ScopeExit),
     Drop(LocalId),
     Dead(LocalId),
     Exit(ScopeId),
@@ -106,6 +110,7 @@ struct Builder<'a> {
     depth: usize,
     cleanup_depth: usize,
     old_parameters: Vec<(hir::LocalId, LocalId)>,
+    contract_calls: Vec<hir::DefId>,
 }
 
 impl<'a> Builder<'a> {
@@ -149,6 +154,7 @@ impl<'a> Builder<'a> {
             scopes: vec![ActiveScope {
                 id: ScopeId(0),
                 registrations: Vec::new(),
+                task: None,
             }],
             loops: Vec::new(),
             sources: vec![None; source.locals.len()],
@@ -163,6 +169,7 @@ impl<'a> Builder<'a> {
             depth: 0,
             cleanup_depth: 0,
             old_parameters: Vec::new(),
+            contract_calls: Vec::new(),
         }
     }
 
@@ -181,7 +188,7 @@ impl<'a> Builder<'a> {
             let local = self.source_local(parameter, LocalKind::Parameter)?;
             self.emit(
                 StatementKind::Argument(local),
-                self.source.locals[parameter.0 as usize].span,
+                self.source.locals[parameter].span,
             );
         }
         self.prepare_contracts()?;
@@ -266,7 +273,7 @@ impl<'a> Builder<'a> {
         Ok(local)
     }
     fn source_local(&mut self, id: hir::LocalId, kind: LocalKind) -> Result<LocalId, LowerError> {
-        let source = &self.source.locals[id.0 as usize];
+        let source = &self.source.locals[id];
         let local = self.local(source.ty, kind, Some(source.name), source.span)?;
         self.sources[id.0 as usize] = Some(local);
         Ok(local)
@@ -281,6 +288,7 @@ impl<'a> Builder<'a> {
         self.scopes.push(ActiveScope {
             id,
             registrations: Vec::new(),
+            task: None,
         });
         self.emit(StatementKind::EnterScope(id), span);
         Ok(())
@@ -305,6 +313,21 @@ impl<'a> Builder<'a> {
         target: BlockId,
         reason: ExitKind,
     ) -> Result<BlockId, LowerError> {
+        let exit = match reason {
+            ExitKind::Normal => super::tasks::ScopeExit::Fallthrough,
+            ExitKind::Panic => super::tasks::ScopeExit::Panic,
+            ExitKind::Cancel => super::tasks::ScopeExit::Cancel,
+        };
+        self.cleanup_to_exit(depth, target, reason, exit)
+    }
+
+    fn cleanup_to_exit(
+        &mut self,
+        depth: usize,
+        target: BlockId,
+        reason: ExitKind,
+        exit: super::tasks::ScopeExit,
+    ) -> Result<BlockId, LowerError> {
         let mut next = target;
         for index in depth..self.scopes.len() {
             let scope = self.scopes[index].id;
@@ -313,6 +336,13 @@ impl<'a> Builder<'a> {
             let cached = self.scope_cleanup.get(&key);
             if let Some(&tail) = cached.and_then(|prefixes| prefixes.get(count)) {
                 next = tail;
+                if let Some((_, registry)) = self.scopes[index].task {
+                    next = self.cleanup_action(
+                        Cleanup::TaskDrain(scope, registry, exit),
+                        next,
+                        reason,
+                    )?;
+                }
                 continue;
             }
             let mut prefixes = self.scope_cleanup.remove(&key).unwrap_or_default();
@@ -327,6 +357,10 @@ impl<'a> Builder<'a> {
                 prefixes.push(head);
             }
             next = prefixes[count];
+            if let Some((_, registry)) = self.scopes[index].task {
+                next =
+                    self.cleanup_action(Cleanup::TaskDrain(scope, registry, exit), next, reason)?;
+            }
             self.scope_cleanup.insert(key, prefixes);
         }
         if reason != ExitKind::Normal {
@@ -358,12 +392,19 @@ impl<'a> Builder<'a> {
         }
         let span = match action {
             Cleanup::Drop(l) | Cleanup::Dead(l) => self.body.local(l).span,
-            Cleanup::Exit(s) => self.body.scopes[s.0 as usize].span,
+            Cleanup::Exit(s) | Cleanup::TaskDrain(s, _, _) => self.body.scopes[s.0 as usize].span,
             Cleanup::Defer(_) => unreachable!("handled above"),
         };
         let id = self.new_block(span, Some(reason))?;
-        let block = &mut self.body.blocks[id.0 as usize];
+        let block = &mut self.body.blocks[id];
         block.terminator = match action {
+            Cleanup::TaskDrain(scope, registry, exit) => Terminator::TaskDrain {
+                scope,
+                registry,
+                exit,
+                next,
+                abort: self.abort,
+            },
             Cleanup::Drop(local) => Terminator::Drop {
                 place: Place::local(local),
                 next,
@@ -410,7 +451,7 @@ impl<'a> Builder<'a> {
         if self.current.is_none() {
             return Ok(());
         }
-        let statement = &self.source.statements[id.0 as usize];
+        let statement = &self.source.statements[id];
         let span = statement.span;
         self.charge(span)?;
         if self.depth >= 512 {
@@ -428,6 +469,8 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Result<(), LowerError> {
         match statement {
+            S::TaskScope { scope, body } => self.task_scope(*scope, body)?,
+            S::Assume(assumption) => self.lower_assumption(assumption, span)?,
             S::Declare { local, initializer } => {
                 // Registration precedes initialization: a failed initializer
                 // cleans its temporaries, but never drops an uninitialized value.
@@ -446,7 +489,7 @@ impl<'a> Builder<'a> {
             }
             S::Assign { target, op, value } => {
                 self.enter(span)?;
-                let target_ty = self.source.expressions[target.0 as usize].ty;
+                let target_ty = self.source.expressions[target].ty;
                 let place = self.place(*target)?;
                 let destination = self.capture(place, target_ty, span)?;
                 // Both the address and compound-assignment old value precede
@@ -498,7 +541,12 @@ impl<'a> Builder<'a> {
                     span,
                 );
                 self.contract_guards(crate::syntax::ast::ClauseKind::Ensures)?;
-                let target = self.cleanup_to(0, self.returned, ExitKind::Normal)?;
+                let target = self.cleanup_to_exit(
+                    0,
+                    self.returned,
+                    ExitKind::Normal,
+                    super::tasks::ScopeExit::Return,
+                )?;
                 self.terminate(Terminator::Goto(target));
                 self.scopes.pop();
             }
@@ -546,7 +594,12 @@ impl<'a> Builder<'a> {
                 } else {
                     (loop_.depth, loop_.update)
                 };
-                let target = self.cleanup_to(depth, target, ExitKind::Normal)?;
+                let exit = if matches!(statement, S::Break) {
+                    super::tasks::ScopeExit::Break
+                } else {
+                    super::tasks::ScopeExit::Continue
+                };
+                let target = self.cleanup_to_exit(depth, target, ExitKind::Normal, exit)?;
                 self.terminate(Terminator::Goto(target));
             }
             S::Empty => {}
@@ -602,7 +655,7 @@ impl<'a> Builder<'a> {
         yes: BlockId,
         no: BlockId,
     ) -> Result<(), LowerError> {
-        let span = self.source.expressions[value.0 as usize].span;
+        let span = self.source.expressions[value].span;
         self.enter(span)?;
         let condition = self.eval(value)?;
         let yes = self.cleanup_to(self.scopes.len() - 1, yes, ExitKind::Normal)?;
@@ -630,7 +683,7 @@ impl<'a> Builder<'a> {
         Ok(Place::local(local).project(Projection::Deref))
     }
     fn eval(&mut self, id: hir::ExprId) -> Result<Operand, LowerError> {
-        let expression = &self.source.expressions[id.0 as usize];
+        let expression = &self.source.expressions[id];
         self.charge(expression.span)?;
         if self.depth >= 512 {
             return self.fail(expression.span, "MIR lowering exceeds its nesting limit");
@@ -641,10 +694,11 @@ impl<'a> Builder<'a> {
         result
     }
     fn eval_inner(&mut self, id: hir::ExprId) -> Result<Operand, LowerError> {
-        let expression = &self.source.expressions[id.0 as usize];
+        let expression = &self.source.expressions[id];
         let ty = expression.ty;
         let span = expression.span;
         match &expression.kind {
+            H::Spawn { .. } => self.spawn_expression(expression),
             H::Match {
                 subject,
                 temporary,
@@ -667,8 +721,7 @@ impl<'a> Builder<'a> {
                 value: value.clone(),
                 ty,
             }),
-            H::Definition(definition) => match self.program.definitions[definition.0 as usize].kind
-            {
+            H::Definition(definition) => match self.program.definitions[definition].kind {
                 hir::DefinitionKind::Function => Ok(Operand::Function {
                     definition: *definition,
                     ty,
@@ -897,13 +950,13 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Result<Operand, LowerError> {
         let mut resolved_callee = callee;
-        while let H::Group(inner) = self.source.expressions[resolved_callee.0 as usize].kind {
+        while let H::Group(inner) = self.source.expressions[resolved_callee].kind {
             resolved_callee = inner;
         }
-        let variant = match self.source.expressions[resolved_callee.0 as usize].kind {
+        let variant = match self.source.expressions[resolved_callee].kind {
             H::Definition(definition)
                 if matches!(
-                    self.program.definitions[definition.0 as usize].kind,
+                    self.program.definitions[definition].kind,
                     hir::DefinitionKind::Variant { .. }
                 ) =>
             {
@@ -926,6 +979,9 @@ impl<'a> Builder<'a> {
                 },
                 span,
             );
+        }
+        if let Some(Operand::Function { definition, .. }) = &function {
+            self.call_contracts(*definition, &values, span)?;
         }
         let local = self.local(ty, LocalKind::Temporary, None, span)?;
         let normal = self.new_block(span, None)?;
@@ -960,7 +1016,7 @@ impl<'a> Builder<'a> {
         argument: hir::ExprId,
         parameter: TyId,
     ) -> Result<Operand, LowerError> {
-        let expression = &self.source.expressions[argument.0 as usize];
+        let expression = &self.source.expressions[argument];
         if let Ty::Reference { mutable, .. } = self.program.types.get(parameter)
             && matches!(
                 self.program.types.get(expression.ty),
@@ -987,7 +1043,7 @@ impl<'a> Builder<'a> {
         self.eval(argument)
     }
     fn place(&mut self, id: hir::ExprId) -> Result<Place, LowerError> {
-        let expression = &self.source.expressions[id.0 as usize];
+        let expression = &self.source.expressions[id];
         self.charge(expression.span)?;
         if self.depth >= 512 {
             return self.fail(
@@ -1001,7 +1057,7 @@ impl<'a> Builder<'a> {
         result
     }
     fn place_inner(&mut self, id: hir::ExprId) -> Result<Place, LowerError> {
-        let expression = &self.source.expressions[id.0 as usize];
+        let expression = &self.source.expressions[id];
         match &expression.kind {
             H::Local(local) => self
                 .pattern_bindings
@@ -1020,9 +1076,7 @@ impl<'a> Builder<'a> {
             } => {
                 let mut place = self.place(*base)?;
                 if matches!(
-                    self.program
-                        .types
-                        .get(self.source.expressions[base.0 as usize].ty),
+                    self.program.types.get(self.source.expressions[base].ty),
                     Ty::Reference { .. }
                 ) {
                     place = place.project(Projection::Deref);
@@ -1038,9 +1092,7 @@ impl<'a> Builder<'a> {
             H::Field { base, index } => {
                 let mut place = self.place(*base)?;
                 if matches!(
-                    self.program
-                        .types
-                        .get(self.source.expressions[base.0 as usize].ty),
+                    self.program.types.get(self.source.expressions[base].ty),
                     Ty::Reference { .. }
                 ) {
                     place = place.project(Projection::Deref);
@@ -1049,14 +1101,14 @@ impl<'a> Builder<'a> {
             }
             H::Index { base, index } => {
                 let mut place = self.place(*base)?;
-                let mut ty = self.source.expressions[base.0 as usize].ty;
+                let mut ty = self.source.expressions[base].ty;
                 if let Ty::Reference { inner, .. } = self.program.types.get(ty) {
                     ty = *inner;
                     place = place.project(Projection::Deref);
                 }
                 let base = self.capture(place, ty, expression.span)?;
                 let value = self.eval(*index)?;
-                let index_ty = self.source.expressions[index.0 as usize].ty;
+                let index_ty = self.source.expressions[index].ty;
                 let index = self.local(index_ty, LocalKind::Temporary, None, expression.span)?;
                 self.assign(Place::local(index), Rvalue::Use(value), expression.span);
                 let normal = self.new_block(expression.span, None)?;

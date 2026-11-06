@@ -42,7 +42,7 @@ impl<'a> Trace<'a> {
             .find(|body| {
                 compilation
                     .symbols
-                    .get(hir.definitions[body.definition.0 as usize].name)
+                    .get(hir.definitions[body.definition].name)
                     == "f"
             })
             .unwrap();
@@ -319,7 +319,7 @@ fn changing_owner_recomputation_or_variant_guards_invalidates_the_artifact() {
         .find(|body| {
             compilation
                 .symbols
-                .get(hir.definitions[body.definition.0 as usize].name)
+                .get(hir.definitions[body.definition].name)
                 == "f"
         })
         .unwrap();

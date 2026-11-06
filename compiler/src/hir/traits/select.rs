@@ -188,7 +188,7 @@ impl Bounds<'_> {
         depth: usize,
     ) -> Result<(), SelectionError> {
         self.charge(depth)?;
-        let bounds = self.program.definitions[owner.0 as usize].bounds.clone();
+        let bounds = self.program.definitions[owner].bounds.clone();
         for bound in bounds {
             let Some(GenericArg::Type(target)) = arguments.get(bound.parameter as usize) else {
                 return Err(error("trait bound requires a type argument"));
@@ -213,7 +213,7 @@ impl Bounds<'_> {
     ) -> Result<(), SelectionError> {
         self.charge(depth)?;
         if let Ty::Parameter { owner, index } = *self.program.types.get(target) {
-            let bounds = self.program.definitions[owner.0 as usize].bounds.clone();
+            let bounds = self.program.definitions[owner].bounds.clone();
             for bound in bounds {
                 if bound.parameter == index
                     && supertraits(self.program, &bound.trait_ref)?.contains(&required)
@@ -234,6 +234,19 @@ impl Bounds<'_> {
             };
         }
         if validate_closure_trait(self.program, target, &required)? {
+            return self.parents(target, &required, depth + 1);
+        }
+        let property = self
+            .program
+            .traits
+            .iter()
+            .find(|trait_| trait_.definition == required.definition)
+            .and_then(|trait_| trait_.language_item)
+            .and_then(crate::tasks::transfer::Property::from_role);
+        if let Some(property) = property {
+            let properties = crate::local::properties::Properties::compute(self.program);
+            crate::tasks::transfer::check(self.program, &properties, target, property)
+                .map_err(|message| error(&message.to_string()))?;
             return self.parents(target, &required, depth + 1);
         }
         let key = (target, required.clone());
@@ -289,12 +302,7 @@ impl<'a> Matcher<'a> {
         Self {
             program,
             owner,
-            inferred: vec![
-                None;
-                program.definitions[owner.0 as usize]
-                    .generic_parameter_kinds
-                    .len()
-            ],
+            inferred: vec![None; program.definitions[owner].generic_parameter_kinds.len()],
             remaining: 4096,
         }
     }

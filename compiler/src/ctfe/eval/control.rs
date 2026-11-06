@@ -80,7 +80,7 @@ impl Evaluator<'_> {
             Error::new(
                 "E-CONST-CONTEXT",
                 "constant condition must be bool",
-                frame.expressions[expression.0 as usize].span,
+                frame.expressions[expression].span,
             )
         })
     }

@@ -57,7 +57,7 @@ pub(crate) fn requires_execution_mir(program: &mut hir::Program) -> bool {
                 .statements
                 .iter()
                 .filter_map(|statement| match statement.kind {
-                    S::ForIn { iterable, .. } => Some(function.expressions[iterable.0 as usize].ty),
+                    S::ForIn { iterable, .. } => Some(function.expressions[iterable].ty),
                     _ => None,
                 })
         })
@@ -70,7 +70,20 @@ pub(crate) fn requires_execution_mir(program: &mut hir::Program) -> bool {
 }
 
 fn has_structured_forms(program: &hir::Program) -> bool {
-    !program.implementations.is_empty()
+    !program.modular.functions.is_empty()
+        || program
+            .definitions
+            .iter()
+            .any(|d| d.kind == hir::DefinitionKind::Union)
+        || !program.tasks.scopes.is_empty()
+        || !program.contracts.predicates.is_empty()
+        || !program.contracts.intrinsics.is_empty()
+        || program
+            .contracts
+            .signatures
+            .values()
+            .any(|function| !function.clauses.is_empty())
+        || !program.implementations.is_empty()
         || !program.traits.is_empty()
         || !program.closures.is_empty()
         || program
@@ -79,11 +92,26 @@ fn has_structured_forms(program: &hir::Program) -> bool {
             .iter()
             .any(|ty| matches!(ty, Ty::Dynamic { .. } | Ty::SymbolicArray { .. }))
         || program.functions.iter().any(|function| {
-            (!function.clauses.is_empty()
-                && program.definitions[function.definition.0 as usize]
-                    .const_origin
-                    .is_some())
+            function
+                .statements
+                .iter()
+                .any(|statement| matches!(statement.kind, S::Assume(_)))
+                || (!function.clauses.is_empty()
+                    && program.definitions[function.definition]
+                        .const_origin
+                        .is_some())
                 || function.expressions.iter().any(|expression| {
+                    if let H::Unary {
+                        op: UnaryOp::Dereference,
+                        operand,
+                    } = expression.kind
+                        && matches!(
+                            program.types.get(function.expressions[operand].ty),
+                            Ty::Pointer { .. }
+                        )
+                    {
+                        return true;
+                    }
                     matches!(
                         expression.kind,
                         H::Match { .. }
@@ -140,7 +168,7 @@ impl Walker<'_> {
     }
 
     fn statement(&mut self, id: StmtId) {
-        let kind = &self.function.statements[id.0 as usize].kind;
+        let kind = &self.function.statements[id].kind;
         match kind {
             S::Declare {
                 initializer: Some(value),
@@ -158,6 +186,8 @@ impl Walker<'_> {
 
     fn control_statement(&mut self, kind: &S) {
         match kind {
+            S::TaskScope { body, .. } => self.block(body),
+            S::Assume(assumption) => self.push(assumption.predicate, Use::Place),
             S::Block(body) => self.block(body),
             S::Defer { captures, body } => {
                 for (_, value) in captures {
@@ -224,12 +254,20 @@ impl Walker<'_> {
             return;
         }
         self.place_use(id, mode);
-        let kind = &self.function.expressions[id.0 as usize].kind;
+        let kind = &self.function.expressions[id].kind;
         if matches!(kind, H::Match { .. } | H::BlockValue { .. }) {
             self.control_expression(kind);
             return;
         }
         match kind {
+            H::Spawn {
+                callee, arguments, ..
+            } => {
+                self.push(*callee, Use::Value);
+                for &argument in arguments {
+                    self.push(argument, Use::Value);
+                }
+            }
             H::Unary {
                 op: UnaryOp::Move,
                 operand,
@@ -300,7 +338,7 @@ impl Walker<'_> {
 
     fn arguments(&mut self, arguments: &[ExprId], parameters: &[crate::types::TyId]) {
         for (&value, &formal) in arguments.iter().zip(parameters) {
-            let actual = self.function.expressions[value.0 as usize].ty;
+            let actual = self.function.expressions[value].ty;
             let reborrow = matches!(
                 self.program.types.get(actual),
                 Ty::Reference { mutable: true, .. }
@@ -334,7 +372,7 @@ impl Walker<'_> {
     }
 
     fn place_use(&mut self, id: ExprId, mode: Use) {
-        let expression = &self.function.expressions[id.0 as usize];
+        let expression = &self.function.expressions[id];
         if self.properties.get(expression.ty).copy || mode == Use::Place || !self.is_lvalue(id) {
             return;
         }
@@ -356,7 +394,7 @@ impl Walker<'_> {
 
     fn is_lvalue(&self, mut id: ExprId) -> bool {
         for _ in 0..128 {
-            id = match self.function.expressions[id.0 as usize].kind {
+            id = match self.function.expressions[id].kind {
                 H::Local(_)
                 | H::Unary {
                     op: UnaryOp::Dereference,
@@ -398,7 +436,7 @@ impl Walker<'_> {
 
     fn invalid_move(&self, mut id: ExprId) -> Option<(&'static str, &'static str)> {
         for _ in 0..128 {
-            id = match self.function.expressions[id.0 as usize].kind {
+            id = match self.function.expressions[id].kind {
                 H::Unary {
                     op: UnaryOp::Dereference,
                     ..
@@ -415,7 +453,7 @@ impl Walker<'_> {
                     ));
                 }
                 H::Field { base, .. } | H::VariantField { base, .. } => {
-                    let ty = self.function.expressions[base.0 as usize].ty;
+                    let ty = self.function.expressions[base].ty;
                     if matches!(self.program.types.get(ty), Ty::Reference { .. }) {
                         return Some((
                             "E-MOVE-REFERENCE",

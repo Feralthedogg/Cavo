@@ -108,6 +108,7 @@ impl Capture<'_> {
             fields.insert(path.clone(), origins);
         }
         Some(summary::Value {
+            parameters: value.parameters.clone(),
             fields,
             functions: value.functions.clone(),
             vtables: value.vtables.clone(),

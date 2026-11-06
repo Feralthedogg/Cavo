@@ -227,7 +227,7 @@ impl Body<'_, '_> {
         properties: &Properties,
         span: Span,
     ) -> ExprId {
-        let ty = self.function.locals[local.0 as usize].ty;
+        let ty = self.function.locals[local].ty;
         let value = self.add_expr(H::Local(local), ty, span);
         if properties.get(ty).copy {
             value
@@ -251,7 +251,7 @@ impl Body<'_, '_> {
         properties: &Properties,
         span: Span,
     ) -> Pattern {
-        let ty = self.function.locals[local.0 as usize].ty;
+        let ty = self.function.locals[local].ty;
         let mode = if properties.get(ty).copy {
             BindingMode::Copy
         } else {

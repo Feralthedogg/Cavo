@@ -37,7 +37,7 @@ fn validate_function(
         span,
     )?;
     owner(hir, definition, span)?;
-    let declaration = &hir.definitions[definition.0 as usize];
+    let declaration = &hir.definitions[definition];
     ensure(
         declaration.kind == hir::DefinitionKind::Function && declaration.foreign_abi.is_none(),
         "constant function must have a source function declaration",
@@ -105,7 +105,7 @@ fn validate_global(
     )?;
     owner(hir, definition, global.span)?;
     valid_type(hir, global.ty, global.span)?;
-    let declaration = &hir.definitions[definition.0 as usize];
+    let declaration = &hir.definitions[definition];
     ensure(
         declaration.kind == hir::DefinitionKind::Global,
         "constant initializer has no global declaration",
@@ -356,7 +356,7 @@ impl Body<'_> {
             "constant call argument count mismatch",
             span,
         )?;
-        let kinds = &self.hir.definitions[definition.0 as usize].generic_parameter_kinds;
+        let kinds = &self.hir.definitions[definition].generic_parameter_kinds;
         ensure(
             generics.len() == kinds.len(),
             "constant call generic argument count mismatch",

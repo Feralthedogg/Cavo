@@ -1,5 +1,8 @@
 //! Frontend artifacts are owned by a compilation and contain no LLVM/runtime state.
 
+mod arena;
+pub mod codegen;
+pub mod contracts;
 pub mod ctfe;
 pub mod diagnostic;
 pub mod driver;
@@ -9,11 +12,15 @@ pub mod hir;
 pub mod layout;
 pub mod local;
 pub mod mir;
+pub mod modular;
 pub mod mono;
+pub mod native;
+pub mod packages;
 pub mod sema;
 pub mod source;
 pub mod symbol;
 pub mod syntax;
+pub mod tasks;
 pub mod types;
 
 use diagnostic::Diagnostic;
@@ -23,6 +30,7 @@ use syntax::ast::Ast;
 
 #[derive(Debug, Default)]
 pub struct Compilation {
+    verified_modules: std::collections::BTreeMap<FileId, modular::capsule::VerifiedImport>,
     pub sources: SourceMap,
     pub symbols: Interner,
     pub ast: Ast,
@@ -85,7 +93,12 @@ impl Compilation {
             AnalysisPath::SourceCfg
         };
         let summaries = if path == AnalysisPath::ExecutionMir {
-            bindings.reports
+            local::external_reports(
+                &mut program,
+                bindings,
+                &self.external_summaries,
+                &mut self.diagnostics,
+            )
         } else {
             self.check_local(&mut program, bindings)?;
             self.local_analysis
@@ -135,6 +148,36 @@ impl Compilation {
         let mut input = self.prepare_input()?;
         self.build_mir(&mut input.program, &input.summaries)?;
         let roots = mono::default_roots(&input.program);
+        self.specialize(input, roots)
+    }
+
+    /// Instantiate only the executable entry's reachable graph.
+    pub fn check_executable(&mut self) -> Option<mono::Program> {
+        let mut input = self.prepare_input()?;
+        self.build_mir(&mut input.program, &input.summaries)?;
+        let roots = mono::default_roots(&input.program)
+            .into_iter()
+            .filter(|key| {
+                self.symbols
+                    .get(input.program.definitions[key.definition].name)
+                    == "main"
+            })
+            .collect::<Vec<_>>();
+        if roots.len() != 1 {
+            self.frontend_error(
+                "E-ENTRY",
+                "an executable requires exactly one non-generic main function".into(),
+            );
+            return None;
+        }
+        self.specialize(input, roots)
+    }
+
+    fn specialize(
+        &mut self,
+        input: CheckedInput,
+        roots: Vec<mono::InstanceKey>,
+    ) -> Option<mono::Program> {
         let context = mono::Context {
             symbols: &self.symbols,
             sources: &self.sources,
@@ -180,7 +223,7 @@ impl Compilation {
             }
             return None;
         }
-        match mir::analyze(&mir, hir, &self.symbols, summaries) {
+        match mir::analyze(&mir, hir, &self.symbols, summaries, &self.sources) {
             Ok(analysis) => {
                 analysis.diagnostics(&mut self.diagnostics);
                 self.mir_analysis = Some(analysis);
@@ -222,11 +265,12 @@ impl Compilation {
         if !self.diagnostics.is_empty() {
             return None;
         }
-        let mut output = sema::check(
+        let mut output = sema::check_with_modules(
             &self.ast,
             &self.sources,
             &self.symbols,
             &mut self.diagnostics,
+            &self.verified_modules,
         );
         if !self.diagnostics.is_empty() {
             return None;

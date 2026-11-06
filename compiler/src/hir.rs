@@ -27,6 +27,9 @@ pub struct StmtId(pub u32);
 
 #[derive(Clone, Debug)]
 pub struct Program {
+    pub modular: crate::modular::Declarations,
+    pub tasks: crate::tasks::Declarations,
+    pub contracts: crate::contracts::Declarations,
     pub constants: crate::ctfe::Program,
     pub stage: ValidationStage,
     pub modules: Vec<Module>,
@@ -147,6 +150,15 @@ pub struct Expr {
 }
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    Spawn {
+        scope: u32,
+        callee: ExprId,
+        type_arguments: Vec<GenericArg>,
+        arguments: Vec<ExprId>,
+        parameter_types: Vec<TyId>,
+        child_result: TyId,
+        capture_type: TyId,
+    },
     Constant(Constant),
     ConstTerm(crate::types::ConstId),
     Local(LocalId),
@@ -272,6 +284,11 @@ pub struct Stmt {
 }
 #[derive(Clone, Debug)]
 pub enum StmtKind {
+    TaskScope {
+        scope: u32,
+        body: Block,
+    },
+    Assume(crate::contracts::SourceAssumption),
     Declare {
         local: LocalId,
         initializer: Option<ExprId>,

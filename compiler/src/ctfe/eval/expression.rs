@@ -1,11 +1,12 @@
 use super::*;
+use crate::arena::Access as _;
 
 impl Evaluator<'_> {
     pub(super) fn eval(&mut self, id: ExprId, frame: &Frame<'_>) -> Result<Value, Error> {
         self.eval_view(id, frame.view())
     }
     fn eval_view(&mut self, id: ExprId, frame: View<'_>) -> Result<Value, Error> {
-        let expression = frame.expressions.get(id.0 as usize).ok_or_else(|| {
+        let expression = frame.expressions.get_id(id).ok_or_else(|| {
             Error::new(
                 "E-CONST-CONTEXT",
                 "invalid constant expression ID",

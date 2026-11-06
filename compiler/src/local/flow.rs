@@ -7,6 +7,7 @@ use super::{
     place::Places,
     properties::Properties,
 };
+use crate::arena::Access as _;
 use crate::{
     diagnostic::{Diagnostic, report},
     hir::{self, ExprId, ExprKind as H},
@@ -1060,7 +1061,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             }
             let diagnostic = (!valid && value.valid).then(|| Problem::RegionReturn {
                 span,
-                signature: self.program.definitions[self.function.definition.0 as usize].span,
+                signature: self.program.definitions[self.function.definition].span,
             });
             self.finding(
                 Predicate::ReturnRegion,
@@ -1178,10 +1179,10 @@ impl<R: Reporter> Evaluator<'_, R> {
                 }
                 if let Some(value) = &mut value {
                     value.valid &= self.typed_regions(
-                        self.function.locals[local.0 as usize].ty,
+                        self.function.locals[local].ty,
                         value,
                         state,
-                        self.function.locals[local.0 as usize].span,
+                        self.function.locals[local].span,
                         "E-REGION-STORE",
                         0,
                     );
@@ -1267,7 +1268,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             Operation::IterationStart { slot, value, event } => {
                 let supported = self
                     .properties
-                    .get(self.function.expressions[value.0 as usize].ty)
+                    .get(self.function.expressions[value].ty)
                     .copy;
                 if !supported {
                     self.unsupported("iteration of a non-Copy iterable", self.expr_span(value));
@@ -1286,14 +1287,11 @@ impl<R: Reporter> Evaluator<'_, R> {
                 );
             }
             Operation::IterationValue { slot, local, event } => {
-                let supported = self
-                    .properties
-                    .get(self.function.locals[local.0 as usize].ty)
-                    .copy;
+                let supported = self.properties.get(self.function.locals[local].ty).copy;
                 if !supported {
                     self.unsupported(
                         "iteration of non-Copy elements",
-                        self.function.locals[local.0 as usize].span,
+                        self.function.locals[local].span,
                     );
                 }
                 let source = self.summary(Places::root(slot), state);
@@ -1301,7 +1299,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                     valid: source.flags == AVAILABLE && supported,
                     origins: if self
                         .properties
-                        .get(self.function.locals[local.0 as usize].ty)
+                        .get(self.function.locals[local].ty)
                         .references
                     {
                         source.origins
@@ -1347,7 +1345,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         }
         value.valid &= target_valid;
         value.valid &= self.typed_regions(
-            self.function.expressions[target.0 as usize].ty,
+            self.function.expressions[target].ty,
             &value,
             state,
             target_span,
@@ -1539,7 +1537,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         self.budget -= 1;
         self.visits += 1;
         let nested = usize::from(!matches!(
-            self.function.expressions[id.0 as usize].kind,
+            self.function.expressions[id].kind,
             H::Binary { .. }
         ));
         self.depth += nested;
@@ -1549,7 +1547,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         let mut value = self.eval_inner(id, mode, state);
         if self
             .properties
-            .get(self.function.expressions[id.0 as usize].ty)
+            .get(self.function.expressions[id].ty)
             .may_drop
         {
             // Unconsumed aggregate/rvalue cleanup may use these references at
@@ -1572,7 +1570,7 @@ impl<R: Reporter> Evaluator<'_, R> {
 
     fn eval_inner(&mut self, id: ExprId, mode: Mode, state: &mut State) -> Value {
         let function = self.function;
-        let node = &function.expressions[id.0 as usize];
+        let node = &function.expressions[id];
         match &node.kind {
             H::Constant(value) => {
                 let mut result = Value::scalar();
@@ -1582,7 +1580,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                 result
             }
             H::Definition(definition) => {
-                let def = &self.program.definitions[definition.0 as usize];
+                let def = &self.program.definitions[definition];
                 if def.kind == hir::DefinitionKind::Function
                     && (!self.contracts[definition.0 as usize]
                         .as_ref()
@@ -1809,6 +1807,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                 result
             }
             H::Old(_)
+            | H::Spawn { .. }
             | H::Error
             | H::ConstTerm(_)
             | H::RepeatConst { .. }
@@ -1835,7 +1834,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         state: &mut State,
     ) -> Value {
         let function = self.function;
-        let node = &function.expressions[id.0 as usize];
+        let node = &function.expressions[id];
         let result_property = self.properties.get(node.ty);
 
         let direct = self.definition(*callee);
@@ -1876,7 +1875,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                     .get(definition.0 as usize)
                     .is_some_and(Option::is_some)
                 || matches!(
-                    self.program.definitions[definition.0 as usize].kind,
+                    self.program.definitions[definition].kind,
                     hir::DefinitionKind::Variant { .. }
                 )
         }) || direct.is_none();
@@ -2148,7 +2147,7 @@ impl<R: Reporter> Evaluator<'_, R> {
     }
     fn place_inner(&mut self, id: ExprId, write: bool, state: &mut State) -> Option<Vec<Target>> {
         let function = self.function;
-        match function.expressions[id.0 as usize].kind {
+        match function.expressions[id].kind {
             H::Local(owner) => Some(vec![Target::Place {
                 place: Places::root(owner),
                 precise: true,
@@ -2159,9 +2158,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             H::Group(inner) => self.place(inner, write, state),
             H::Field { base, .. } | H::Index { base, .. } => {
                 let reference = matches!(
-                    self.program
-                        .types
-                        .get(function.expressions[base.0 as usize].ty),
+                    self.program.types.get(function.expressions[base].ty),
                     Ty::Reference { .. }
                 );
                 let mut targets = if reference {
@@ -2169,15 +2166,15 @@ impl<R: Reporter> Evaluator<'_, R> {
                 } else {
                     self.place(base, write, state)
                 };
-                if let H::Index { index, .. } = function.expressions[id.0 as usize].kind
+                if let H::Index { index, .. } = function.expressions[id].kind
                     && let Some(targets) = &mut targets
                     && !self.eval(index, Mode::Value, state).valid
                 {
                     targets.push(Target::Invalid);
                 }
                 if let Some(targets) = &mut targets {
-                    if let H::Field { index, .. } = function.expressions[id.0 as usize].kind {
-                        let mut ty = function.expressions[base.0 as usize].ty;
+                    if let H::Field { index, .. } = function.expressions[id].kind {
+                        let mut ty = function.expressions[base].ty;
                         if let Ty::Reference { inner, .. } = self.program.types.get(ty) {
                             ty = *inner;
                         }
@@ -2195,7 +2192,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                         } = target
                         {
                             *projected = true;
-                            match function.expressions[id.0 as usize].kind {
+                            match function.expressions[id].kind {
                                 H::Field { index, .. } if *precise => {
                                     let Some(field) = self.places.field(*place, index) else {
                                         self.exhausted = true;
@@ -2231,10 +2228,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         state.temporaries.push(value.origins.clone());
         // Keep a non-Copy reference handle alive while its destination/index is
         // evaluated. Reading the handle is allowed; moving/replacing it is not.
-        if !self
-            .properties
-            .get(self.function.expressions[id.0 as usize].ty)
-            .copy
+        if !self.properties.get(self.function.expressions[id].ty).copy
             && let Some((place, event)) = self.handle_place(id)
         {
             state.temporaries.push(Origins::from([Origin::Borrow {
@@ -2274,7 +2268,7 @@ impl<R: Reporter> Evaluator<'_, R> {
     }
 
     fn load(&mut self, id: ExprId, targets: &[Target], mode: Mode, state: &mut State) -> Value {
-        let node = &self.function.expressions[id.0 as usize];
+        let node = &self.function.expressions[id];
         let property = self.properties.get(node.ty);
         let mut result = Value::scalar();
         let mut copied_value = false;
@@ -2468,7 +2462,7 @@ impl<R: Reporter> Evaluator<'_, R> {
         let valid = slot.flags == AVAILABLE;
         let diagnostic = (!valid && slot.flags != POISON).then_some(Problem::Availability {
             span,
-            binding: self.function.locals.get(local.0 as usize).map(|l| l.span),
+            binding: self.function.locals.get_id(local).map(|l| l.span),
             flags: slot.flags,
             causes: &slot.causes,
         });
@@ -2581,11 +2575,11 @@ impl<R: Reporter> Evaluator<'_, R> {
         );
     }
     fn expr_span(&self, id: ExprId) -> Span {
-        self.function.expressions[id.0 as usize].span
+        self.function.expressions[id].span
     }
     fn definition(&self, mut id: ExprId) -> Option<hir::DefId> {
         for _ in 0..128 {
-            match self.function.expressions[id.0 as usize].kind {
+            match self.function.expressions[id].kind {
                 H::Definition(id) => return Some(id),
                 H::Group(inner) => id = inner,
                 _ => return None,
@@ -2595,7 +2589,7 @@ impl<R: Reporter> Evaluator<'_, R> {
     }
     fn handle_place(&self, mut id: ExprId) -> Option<(PlaceId, EventId)> {
         for _ in 0..128 {
-            match self.function.expressions[id.0 as usize].kind {
+            match self.function.expressions[id].kind {
                 H::Group(inner) => id = inner,
                 _ => {
                     return self

@@ -202,7 +202,7 @@ fn internal_capture_cannot_hide_a_user_drop_ancestor_from_move_checks() {
                 let mir::Operand::Copy(place) = operand else {
                     unreachable!()
                 };
-                (locals[place.local.0 as usize].kind == mir::LocalKind::Address).then_some(operand)
+                (locals[place.local].kind == mir::LocalKind::Address).then_some(operand)
             }
             _ => None,
         })

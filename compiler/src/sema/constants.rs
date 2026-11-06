@@ -125,7 +125,7 @@ impl Context<'_> {
                 self.constant_error(definition, "module constant requires a sized value type")
             );
         }
-        self.program.definitions[definition.0 as usize].ty = ty;
+        self.program.definitions[definition].ty = ty;
         Ok(ty)
     }
 
@@ -193,7 +193,7 @@ impl Context<'_> {
                 "constant evaluation requires a checked source const function",
             ));
         }
-        self.program.definitions[definition.0 as usize].const_origin = Some(definition);
+        self.program.definitions[definition].const_origin = Some(definition);
         if self.constant_queries.functions.contains(&definition) {
             return (self.definition(definition).ty != TyId::ERROR)
                 .then_some(self.definition(definition).ty)
@@ -235,7 +235,7 @@ impl Context<'_> {
             parameters: arguments,
             result,
         });
-        self.program.definitions[definition.0 as usize].ty = ty;
+        self.program.definitions[definition].ty = ty;
         compile::function(self, module, definition, function, &parameters)
     }
 

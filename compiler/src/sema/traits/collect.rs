@@ -27,19 +27,33 @@ impl Context<'_> {
             );
             return;
         };
-        if trusted_reason.is_some() {
-            self.error(
-                "E-IMPL-TRUST",
-                "trusted trait implementations require an external contract witness",
-                item.span,
-            );
-        }
         let owner = self.add_definition(name, module, D::Impl, item.visibility, None);
+        if let Some(reason) = trusted_reason {
+            let span = self.ast.expr(*reason).span;
+            let text = self.sources.file(span.file).slice(span);
+            if let (_, hir::Constant::String(reason)) = literal::check(
+                text,
+                ast::LiteralKind::String,
+                None,
+                false,
+                span,
+                &mut self.program.types,
+                self.diagnostics,
+            ) {
+                if reason.trim().is_empty() || reason.len() > 4096 {
+                    self.error(
+                        "E-IMPL-TRUST",
+                        "contract impl requires a non-empty justification of at most 4096 UTF-8 bytes",
+                        span,
+                    );
+                } else {
+                    self.program.tasks.trusted.insert(owner, reason.into());
+                }
+            }
+        }
         self.item_definitions[item_id.0 as usize] = Some(owner);
-        self.program.definitions[owner.0 as usize].ty = TyId::VOID;
-        self.program.modules[module.0 as usize]
-            .definitions
-            .push(owner);
+        self.program.definitions[owner].ty = TyId::VOID;
+        self.program.modules[module].definitions.push(owner);
         self.collect_generic_parameters(owner, generics, true);
         self.trait_state
             .impl_indices
@@ -86,8 +100,7 @@ impl Context<'_> {
             let Some(method) = self.collect_method(item, module, generics, Some(owner)) else {
                 continue;
             };
-            self.program.definitions[method.0 as usize].visibility =
-                self.definition(owner).visibility;
+            self.program.definitions[method].visibility = self.definition(owner).visibility;
             if !names.insert(self.definition(method).name) {
                 self.error(
                     "E-TRAIT-METHOD",
@@ -125,6 +138,21 @@ impl Context<'_> {
         let mut names = HashSet::new();
         for &item in methods {
             if matches!(&self.ast.item(item).kind, ItemKind::Function(function) if function.body.is_none())
+                && !self
+                    .ast
+                    .item(item)
+                    .attributes
+                    .iter()
+                    .any(|attribute| self.symbols.get(attribute.name.symbol) == "intrinsic")
+                && !self
+                    .verified_modules
+                    .get(&self.ast.item(item).span.file)
+                    .is_some_and(|proof| {
+                        self.ast
+                            .item(item)
+                            .name
+                            .is_some_and(|name| proof.certified_offsets.contains(&name.span.start))
+                    })
             {
                 self.error(
                     "E-IMPL-BODY",
@@ -172,9 +200,7 @@ impl Context<'_> {
         let method = self.add_definition(name, module, D::Function, item.visibility, None);
         self.item_definitions[item_id.0 as usize] = Some(method);
         self.item_modules[item_id.0 as usize] = Some(module);
-        self.program.modules[module.0 as usize]
-            .definitions
-            .push(method);
+        self.program.modules[module].definitions.push(method);
         let mut generics = Vec::new();
         if let Some(owner) = trait_owner {
             let symbol = self
@@ -197,7 +223,7 @@ impl Context<'_> {
     }
 
     fn copy_method_contract(&mut self, definition: DefId, item: &ast::Item) {
-        let target = &mut self.program.definitions[definition.0 as usize];
+        let target = &mut self.program.definitions[definition];
         target.attributes = item
             .attributes
             .iter()
@@ -236,6 +262,10 @@ impl Context<'_> {
             let text = self.sources.file(token.span.file).slice(token.span);
             role = match text {
                 "copy" => Some(model::LanguageItem::Copy),
+                "send" => Some(model::LanguageItem::Send),
+                "sync" => Some(model::LanguageItem::Sync),
+                "task_transfer" => Some(model::LanguageItem::TaskTransfer),
+                "suspend_safe" => Some(model::LanguageItem::SuspendSafe),
                 "drop" => Some(model::LanguageItem::Drop),
                 "from" => Some(model::LanguageItem::From),
                 "fn" => Some(model::LanguageItem::Fn),

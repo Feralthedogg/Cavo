@@ -2,7 +2,8 @@
 //! An established result covers this pass's local domain, never native codegen.
 
 mod flow;
-mod live;
+pub(crate) mod live;
+pub(crate) use live::successors;
 pub mod summary;
 
 use super::*;
@@ -53,6 +54,9 @@ pub struct Loan {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FindingKind {
+    UntrackedOwner,
+    UnknownRegion,
+    TaskEscape,
     Conflict,
     SharedWrite,
     LocalEscape,
@@ -62,6 +66,13 @@ pub enum FindingKind {
 impl FindingKind {
     pub fn message(self) -> &'static str {
         match self {
+            Self::UntrackedOwner => {
+                "cannot establish a tracked owner region for a reference derived from raw memory"
+            }
+            Self::UnknownRegion => {
+                "cannot establish that the reference origin satisfies its required region"
+            }
+            Self::TaskEscape => "a scoped task capability may outlive its owning registry",
             Self::Conflict => "access may conflict with a live MIR loan",
             Self::SharedWrite => "write requires an exclusive reference capability",
             Self::LocalEscape => "a reference to local storage may escape the function",

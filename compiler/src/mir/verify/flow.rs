@@ -16,6 +16,7 @@ enum Init {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct State {
+    registries: Vec<Registry>,
     live: Vec<bool>,
     init: Vec<Init>,
     captures: Vec<Option<usize>>,
@@ -25,9 +26,34 @@ struct State {
     variants: HashSet<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Registry {
+    Closed,
+    Empty,
+    MayOwn,
+    Drained,
+    Inconsistent,
+}
+
+impl Registry {
+    fn join(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else if matches!(
+            (self, other),
+            (Self::Empty, Self::MayOwn) | (Self::MayOwn, Self::Empty)
+        ) {
+            Self::MayOwn
+        } else {
+            Self::Inconsistent
+        }
+    }
+}
+
 impl State {
     fn new(body: &Body, paths: &Paths) -> Self {
         Self {
+            registries: vec![Registry::Closed; body.locals.len()],
             live: vec![false; body.locals.len()],
             init: vec![Init::No; paths.leaves],
             captures: vec![None; body.locals.len()],
@@ -47,6 +73,11 @@ impl State {
             "inconsistent storage lifetime at CFG join",
         )?;
         let mut changed = false;
+        for (left, right) in self.registries.iter_mut().zip(other.registries) {
+            let merged = left.join(right);
+            changed |= *left != merged;
+            *left = merged;
+        }
         for (old, new) in self.init.iter_mut().zip(other.init) {
             let joined = if *old == new { new } else { Init::Maybe };
             changed |= *old != joined;
@@ -108,7 +139,7 @@ struct Worklist {
 }
 impl Worklist {
     fn new(body: &Body, paths: &Paths) -> Self {
-        let width = paths.leaves + body.locals.len() * 2 + body.scopes.len();
+        let width = paths.leaves + body.locals.len() * 3 + body.scopes.len();
         let mut inputs = vec![None; body.blocks.len()];
         inputs[body.entry.0 as usize] = Some(State::new(body, paths));
         let mut queued = vec![false; body.blocks.len()];

@@ -30,10 +30,7 @@ pub(super) fn adapt(
     let mut summary = FunctionSummary::bottom(record.function);
     summary.assumptions.insert(record.assumption);
     let mut normal = Outcome::default();
-    let Ty::Function { result, .. } = hir
-        .types
-        .get(hir.definitions[record.function.0 as usize].ty)
-    else {
+    let Ty::Function { result, .. } = hir.types.get(hir.definitions[record.function].ty) else {
         return None;
     };
     let mutable = matches!(hir.types.get(*result), Ty::Reference { mutable: true, .. });
@@ -122,7 +119,7 @@ fn add_access(
     Some(())
 }
 
-fn origin(text: &str, frame: &Frame) -> Option<Origin> {
+pub(super) fn origin(text: &str, frame: &Frame) -> Option<Origin> {
     if text == "static" {
         return Some(Origin::Static);
     }
@@ -130,7 +127,7 @@ fn origin(text: &str, frame: &Frame) -> Option<Origin> {
     Some(Origin::Input(frame.syntax_input(parameter, &path)? as u32))
 }
 
-fn write(store: &crate::external::ReferenceStore, frame: &Frame) -> Option<Write> {
+pub(super) fn write(store: &crate::external::ReferenceStore, frame: &Frame) -> Option<Write> {
     let (parameter, syntax) = path(&store.target)?;
     let target_input = frame.syntax_input(parameter, &syntax)?;
     let target_ref = &frame.inputs[target_input];
@@ -161,7 +158,7 @@ fn write(store: &crate::external::ReferenceStore, frame: &Frame) -> Option<Write
     })
 }
 
-fn writable(mut input: u32, frame: &Frame) -> Option<()> {
+pub(super) fn writable(mut input: u32, frame: &Frame) -> Option<()> {
     loop {
         let reference = frame.inputs.get(input as usize)?;
         if !reference.mutable {

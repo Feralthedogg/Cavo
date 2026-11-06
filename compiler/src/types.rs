@@ -594,7 +594,7 @@ impl TypeContext {
                 definition,
                 arguments,
             } => {
-                let name = symbols.get(definitions[definition.0 as usize].name);
+                let name = symbols.get(definitions[definition].name);
                 if arguments.is_empty() {
                     name.to_owned()
                 } else {
@@ -642,7 +642,7 @@ impl TypeContext {
                 trait_definition,
                 arguments,
             } => {
-                let name = symbols.get(definitions[trait_definition.0 as usize].name);
+                let name = symbols.get(definitions[trait_definition].name);
                 if arguments.is_empty() {
                     format!("dyn {name}")
                 } else {

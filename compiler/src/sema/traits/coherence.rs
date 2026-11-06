@@ -89,8 +89,8 @@ fn may_overlap(program: &hir::Program, left: usize, right: usize, remaining: &mu
     if left.trait_ref.is_none()
         && !left.methods.iter().any(|a| {
             right.methods.iter().any(|b| {
-                program.definitions[a.implementation.0 as usize].name
-                    == program.definitions[b.implementation.0 as usize].name
+                program.definitions[a.implementation].name
+                    == program.definitions[b.implementation].name
             })
         })
     {

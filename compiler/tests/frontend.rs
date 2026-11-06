@@ -450,8 +450,8 @@ fn contracts_are_retained_as_typed_unproven_clauses() {
 
 #[test]
 fn implemented_match_and_traits_check_while_future_stage_features_fail_closed() {
-    fails("void f() { scope {} }", "E-FRONTEND-STAGE");
-    fails("void f() { contract {} }", "E-FRONTEND-STAGE");
+    passes("void f() { scope {} }");
+    passes("void f() { contract {} }");
     passes("i32 f(i32 value) { return match (value) { _ => 0 }; }");
     passes("trait T { void f(&Self self); }");
 }
@@ -569,7 +569,7 @@ fn hir_validation_checks_cycles_crossing_expression_and_statement_arenas() {
             _ => None,
         })
         .unwrap();
-    function.expressions[expression.0 as usize].kind = hir::ExprKind::BlockValue {
+    function.expressions[expression].kind = hir::ExprKind::BlockValue {
         body: function.body.clone(),
         value: None,
     };

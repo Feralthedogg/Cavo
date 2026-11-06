@@ -26,6 +26,19 @@ impl Flow<'_, '_> {
         state: &mut State,
     ) -> Result<(), InvariantError> {
         match statement {
+            StatementKind::RegistryStart(local) => {
+                require(
+                    state.registries[local.0 as usize] == Registry::Closed,
+                    "task registry was initialized twice or after admission",
+                )?;
+                self.initialize(&Place::local(*local), state)?;
+                state.registries[local.0 as usize] = Registry::Empty;
+            }
+            StatementKind::Contract(contract) => {
+                for argument in &contract.atom.arguments {
+                    self.consume(argument, state)?;
+                }
+            }
             StatementKind::EnterScope(scope) => {
                 require(
                     state.scopes.last().copied()
@@ -72,6 +85,13 @@ impl Flow<'_, '_> {
         let index = local.0 as usize;
         require(!state.live[index], "local storage is already live")?;
         let binding = self.verifier.body.local(local);
+        if binding.kind == LocalKind::TaskRegistry {
+            require(
+                state.registries[index] != Registry::MayOwn,
+                "task registry storage ended before the cancellation-immune drain",
+            )?;
+            state.registries[index] = Registry::Closed;
+        }
         require(
             binding.kind == LocalKind::Return || state.scopes.contains(&binding.scope),
             "storage starts outside its declaring scope",
@@ -96,6 +116,13 @@ impl Flow<'_, '_> {
         let index = local.0 as usize;
         require(state.live[index], "local storage is already dead")?;
         let binding = self.verifier.body.local(local);
+        if binding.kind == LocalKind::TaskRegistry {
+            require(
+                state.registries[index] == Registry::Drained,
+                "task registry storage ended before the cancellation-immune drain",
+            )?;
+            state.registries[index] = Registry::Closed;
+        }
         let root = Access::owned(self.paths.roots[index]);
         let needs_cleanup = binding.kind == LocalKind::ArrayIterator
             || self.verifier.properties.get(binding.ty).may_drop;
@@ -192,6 +219,13 @@ impl Flow<'_, '_> {
 
     fn exit(&self, exit: &Terminator, state: &mut State) -> Result<Edges, InvariantError> {
         match exit {
+            Terminator::Spawn { .. } => self.spawn(exit, state),
+            Terminator::TaskDrain {
+                registry,
+                next,
+                abort,
+                ..
+            } => self.drain(*registry, *next, *abort, state),
             Terminator::Goto(target) => Ok(vec![(*target, state.clone())]),
             Terminator::Switch { condition, yes, no } => self.switch(condition, *yes, *no, state),
             Terminator::Call { .. } | Terminator::DynCall { .. } => self.call(exit, state),
@@ -231,6 +265,63 @@ impl Flow<'_, '_> {
             }
             Terminator::Abort | Terminator::Unreachable => Ok(Vec::new()),
         }
+    }
+
+    fn spawn(&self, exit: &Terminator, state: &mut State) -> Result<Edges, InvariantError> {
+        let Terminator::Spawn {
+            registry,
+            callee,
+            arguments,
+            destination,
+            normal,
+            panic,
+            cancel,
+            ..
+        } = exit
+        else {
+            unreachable!("spawn transfer")
+        };
+        require(
+            matches!(
+                state.registries[registry.0 as usize],
+                Registry::Empty | Registry::MayOwn
+            ),
+            "spawn attempted after admission was sealed or before registry initialization",
+        )?;
+        self.read(&Place::local(*registry), state)?;
+        self.consume(callee, state)?;
+        for argument in arguments {
+            self.consume(argument, state)?;
+        }
+        state.registries[registry.0 as usize] = Registry::MayOwn;
+        let failure = state.clone();
+        self.initialize(destination, state)?;
+        state.forget_guards();
+        Ok(vec![
+            (*normal, state.clone()),
+            (*panic, failure.clone()),
+            (*cancel, failure),
+        ])
+    }
+
+    fn drain(
+        &self,
+        registry: LocalId,
+        next: BlockId,
+        abort: BlockId,
+        state: &mut State,
+    ) -> Result<Edges, InvariantError> {
+        require(
+            matches!(
+                state.registries[registry.0 as usize],
+                Registry::Empty | Registry::MayOwn
+            ),
+            "task drain repeated, uninitialized, or path-inconsistent",
+        )?;
+        self.read(&Place::local(registry), state)?;
+        state.registries[registry.0 as usize] = Registry::Drained;
+        state.forget_guards();
+        Ok(vec![(next, state.clone()), (abort, state.clone())])
     }
 
     fn switch(

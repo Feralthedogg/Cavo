@@ -1,4 +1,5 @@
 use super::{DefId, DefinitionKind, InvariantError, Program};
+use crate::arena::Access as _;
 use crate::types::Ty;
 
 /// Environments remain ordinary owned records. The kind selects the hidden
@@ -30,6 +31,9 @@ impl Program {
     /// Interface and summary lookup build this set once at their own boundary.
     pub fn internal_definitions(&self) -> std::collections::HashSet<DefId> {
         let mut internal = std::collections::HashSet::new();
+        internal.extend(self.tasks.captures.iter().copied());
+        internal.extend(self.contracts.intrinsics.keys().copied());
+        internal.extend(self.modular.imported.keys().copied());
         for closure in &self.closures {
             internal.insert(closure.environment);
             internal.insert(closure.function);
@@ -83,8 +87,8 @@ impl Program {
         kind: ClosureKind,
     ) -> Result<(), InvariantError> {
         let expected = environment;
-        let environment = self.definitions.get(environment.0 as usize);
-        let function = self.definitions.get(function.0 as usize);
+        let environment = self.definitions.get_id(environment);
+        let function = self.definitions.get_id(function);
         let (Some(environment), Some(function)) = (environment, function) else {
             return Err(InvariantError(
                 "closure has an invalid definition ID".into(),

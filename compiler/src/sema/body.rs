@@ -1,6 +1,9 @@
 use super::{Context, literal};
 mod calls;
 mod constants;
+mod contracts;
+mod tasks;
+pub(super) use contracts::{check_predicate, check_signature};
 mod generics;
 mod records;
 use crate::{
@@ -44,6 +47,12 @@ pub(super) fn check_function(
         let clause = checker.clause(clause);
         checker.function.clauses.push(clause);
     }
+    checker
+        .context
+        .program
+        .contracts
+        .signatures
+        .insert(definition, checker.function.clone());
     let (checked, falls_through) = checker.block(body);
     checker.function.body = checked;
     if falls_through && result != TyId::VOID && result != TyId::ERROR {
@@ -80,6 +89,9 @@ struct Body<'a, 'b> {
     depth: usize,
     expression_frames: usize,
     in_contract: bool,
+    old_allowed: bool,
+    contract_depth: usize,
+    task_scopes: Vec<(u32, crate::types::Region)>,
     return_mode: ReturnMode,
     uncaptured: HashSet<Symbol>,
     constant_values: HashMap<LocalId, super::constants::ConstBinding>,
@@ -113,6 +125,9 @@ impl<'a, 'b> Body<'a, 'b> {
             depth: 0,
             expression_frames: 0,
             in_contract: false,
+            old_allowed: false,
+            contract_depth: 0,
+            task_scopes: Vec::new(),
             return_mode: ReturnMode::Declared,
             uncaptured: HashSet::new(),
             constant_values: HashMap::new(),
@@ -134,6 +149,7 @@ impl<'a, 'b> Body<'a, 'b> {
     }
     fn clause(&mut self, clause: &ast::Clause) -> hir::Clause {
         self.in_contract = true;
+        self.old_allowed = clause.kind == ast::ClauseKind::Ensures;
         self.scopes.push(HashMap::new());
         let result_local =
             if clause.kind == ast::ClauseKind::Ensures && self.function.result != TyId::VOID {
@@ -150,6 +166,7 @@ impl<'a, 'b> Body<'a, 'b> {
         let predicate = self.expression(clause.predicate, Some(TyId::BOOL));
         self.scopes.pop();
         self.in_contract = false;
+        self.old_allowed = false;
         hir::Clause {
             kind: clause.kind,
             predicate,
@@ -157,6 +174,13 @@ impl<'a, 'b> Body<'a, 'b> {
         }
     }
     fn add_expr(&mut self, kind: H, ty: TyId, span: Span) -> ExprId {
+        if let H::Unary {
+            op: U::Borrow | U::BorrowMut,
+            operand,
+        } = &kind
+        {
+            self.check_reference_alignment(*operand, span);
+        }
         let id = ExprId(self.function.expressions.len() as u32);
         self.function.expressions.push(hir::Expr { kind, ty, span });
         id
@@ -167,7 +191,7 @@ impl<'a, 'b> Body<'a, 'b> {
         id
     }
     fn expr(&self, id: ExprId) -> &hir::Expr {
-        &self.function.expressions[id.0 as usize]
+        &self.function.expressions[id]
     }
     fn ty(&self, id: ExprId) -> TyId {
         self.expr(id).ty
@@ -179,10 +203,8 @@ impl<'a, 'b> Body<'a, 'b> {
         if let Some(previous) = self.scopes.last().and_then(|scope| scope.get(&name.symbol)) {
             report(
                 self.context.diagnostics,
-                Diagnostic::error("E-NAME-DUPLICATE", "duplicate local binding", name.span).label(
-                    self.function.locals[previous.0 as usize].span,
-                    "first binding",
-                ),
+                Diagnostic::error("E-NAME-DUPLICATE", "duplicate local binding", name.span)
+                    .label(self.function.locals[previous].span, "first binding"),
             );
         }
         if ty == TyId::VOID
@@ -347,6 +369,9 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             StmtKind::Expression(expression) => {
                 let value = self.expression(*expression, None);
+                if super::tasks::contains_task(&self.context.program, self.ty(value), 0) {
+                    self.context.error("E-TASK-MUST-USE", "task admission and observation handles must be bound or explicitly ignored", source.span);
+                }
                 falls = !self.expression_diverges(value);
                 S::Expression(value)
             }
@@ -544,14 +569,20 @@ impl<'a, 'b> Body<'a, 'b> {
             StmtKind::StaticAssert(assertion) => self.static_assertion(assertion),
             StmtKind::Empty => S::Empty,
             StmtKind::Scope { .. } => {
-                self.context
-                    .unsupported("task scope lifetime/effect checking", source.span);
-                S::Error
+                let StmtKind::Scope { body, .. } = &source.kind else {
+                    unreachable!();
+                };
+                let (scope, continues) = self.task_scope(body, source.span);
+                falls = continues;
+                scope
             }
-            StmtKind::Contract(_) | StmtKind::Assume { .. } => {
-                self.context
-                    .unsupported("raw contract permission checking", source.span);
-                S::Error
+            StmtKind::Contract(body) => {
+                let (block, continues) = self.contract_block(body);
+                falls = continues;
+                block
+            }
+            StmtKind::Assume { predicate, reason } => {
+                self.assumption(*predicate, *reason, source.span)
             }
             StmtKind::Defer(body) => self.deferred(body),
             StmtKind::Error => S::Error,
@@ -659,9 +690,15 @@ impl<'a, 'b> Body<'a, 'b> {
                     if !matches!(
                         self.context.definition(definition).kind,
                         hir::DefinitionKind::Function | hir::DefinitionKind::Variant { .. }
-                    ) {
-                        self.context
-                            .error("E-TYPE-VALUE", "this name is not a value", source.span);
+                    ) && (self.context.definition(definition).kind
+                        != hir::DefinitionKind::Contract
+                        || !self.in_contract)
+                    {
+                        self.context.error(
+                            "E-TYPE-VALUE",
+                            "logical contracts may only appear in requires, ensures or assume",
+                            source.span,
+                        );
                     }
                     if let Some(ty) = self.unit_variant_type(definition, expected, source.span) {
                         return self.add_expr(H::Definition(definition), ty, source.span);
@@ -720,9 +757,7 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             A::Unary { op, operand } => {
                 if *op == U::Spawn {
-                    self.context
-                        .unsupported("spawn task/effect checking", source.span);
-                    return self.add_expr(H::Error, TyId::ERROR, source.span);
+                    return self.spawn(*operand, source.span);
                 }
                 let operand_expected = match op {
                     U::Not => Some(TyId::BOOL),
@@ -783,10 +818,12 @@ impl<'a, 'b> Body<'a, 'b> {
                     }
                     U::Dereference => match self.type_kind(ty) {
                         Ty::Reference { inner, .. } => *inner,
-                        Ty::Pointer { .. } => {
-                            self.context
-                                .unsupported("raw dereference permission checking", source.span);
-                            TyId::ERROR
+                        Ty::Pointer { inner, .. } => {
+                            let inner = *inner;
+                            if self.contract_depth == 0 {
+                                self.context.error("E-CONTRACT-BOUNDARY", "raw dereference requires a contract boundary and established permission", source.span);
+                            }
+                            inner
                         }
                         Ty::Error => TyId::ERROR,
                         _ => {
@@ -894,8 +931,14 @@ impl<'a, 'b> Body<'a, 'b> {
                 if let (Some((definition, arguments)), Some((index, ty, visibility, span))) =
                     (nominal, field)
                 {
-                    if self.context.definition(definition).module != self.module
-                        && visibility == ast::Visibility::Private
+                    if self.context.definition(definition).kind == hir::DefinitionKind::Union
+                        && self.contract_depth == 0
+                    {
+                        self.context.error("E-CONTRACT-BOUNDARY", "union field access requires a contract boundary and active-field evidence", name.span);
+                    }
+                    if !self
+                        .context
+                        .field_visible(definition, visibility, self.module)
                     {
                         report(
                             self.context.diagnostics,
@@ -1010,11 +1053,7 @@ impl<'a, 'b> Body<'a, 'b> {
     }
     fn read_local(&mut self, local: LocalId, span: Span) -> ExprId {
         // Initialization at uses is checked on the CFG, including loop backedges.
-        self.add_expr(
-            H::Local(local),
-            self.function.locals[local.0 as usize].ty,
-            span,
-        )
+        self.add_expr(H::Local(local), self.function.locals[local].ty, span)
     }
     fn place_expression(&mut self, id: ast::ExprId, read: bool) -> ExprId {
         if let A::Group(inner) = self.context.ast.expr(id).kind {
@@ -1034,7 +1073,7 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             return self.add_expr(
                 H::Local(local),
-                self.function.locals[local.0 as usize].ty,
+                self.function.locals[local].ty,
                 self.context.ast.expr(id).span,
             );
         }
@@ -1042,7 +1081,7 @@ impl<'a, 'b> Body<'a, 'b> {
     }
     fn mutable_place(&self, id: ExprId) -> bool {
         match self.expr(id).kind {
-            H::Local(local) => self.function.locals[local.0 as usize].mutable,
+            H::Local(local) => self.function.locals[local].mutable,
             H::Group(inner) => self.mutable_place(inner),
             H::Field { base, .. } | H::Index { base, .. } => match self.type_kind(self.ty(base)) {
                 Ty::Reference { mutable, .. } => *mutable,
@@ -1054,6 +1093,10 @@ impl<'a, 'b> Body<'a, 'b> {
             } => matches!(
                 self.type_kind(self.ty(operand)),
                 Ty::Reference { mutable: true, .. }
+                    | Ty::Pointer {
+                        constant: false,
+                        ..
+                    }
             ),
             H::Error => true,
             _ => false,

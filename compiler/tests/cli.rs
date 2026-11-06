@@ -317,7 +317,7 @@ fn cavoite_emits_resolved_hir_and_unproven_stage() {
 }
 
 #[test]
-fn parser_accepts_future_runtime_syntax_without_claiming_to_check_it() {
+fn parser_accepts_runtime_syntax_and_semantics_require_real_library_providers() {
     let output = Command::new(env!("CARGO_BIN_EXE_cavoite"))
         .arg("parse")
         .arg(sample("syntax.cavo"))
@@ -342,7 +342,7 @@ fn parser_accepts_future_runtime_syntax_without_claiming_to_check_it() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("E-FRONTEND-STAGE")
+            .contains("E-NAME-UNKNOWN")
     );
 }
 

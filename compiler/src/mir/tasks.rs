@@ -10,7 +10,7 @@ use std::{collections::VecDeque, fmt};
 const BLOCK_LIMIT: usize = 128;
 const TRANSITION_LIMIT: usize = 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScopeExit {
     Fallthrough,
     Return,
@@ -305,7 +305,7 @@ impl Graph {
                 steps <= TRANSITION_LIMIT,
                 "task protocol work limit exceeded",
             )?;
-            let block = &self.blocks[id.0 as usize];
+            let block = &self.blocks[id];
             let mut state = inputs[id.0 as usize].expect("queued protocol state");
             for &operation in &block.operations {
                 state = operation.apply(state, exit)?;

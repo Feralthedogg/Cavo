@@ -20,12 +20,15 @@ impl Builder<'_> {
         arguments: &[hir::ExprId],
         parameter_types: &[TyId],
     ) -> Result<Operand, LowerError> {
-        let node = &self.source.expressions[expression.0 as usize];
+        let node = &self.source.expressions[expression];
         let (ty, span) = (node.ty, node.span);
-        let receiver_ty = self.source.expressions[receiver.0 as usize].ty;
+        let receiver_ty = self.source.expressions[receiver].ty;
         // Receiver evaluation and its reborrow precede every explicit argument.
         let receiver = self.call_argument(receiver, receiver_ty)?;
         let arguments = self.call_arguments(arguments, parameter_types)?;
+        let mut obligations = vec![receiver.clone()];
+        obligations.extend(arguments.iter().cloned());
+        self.call_contracts(trait_method, &obligations, span)?;
         let local = self.local(ty, LocalKind::Temporary, None, span)?;
         let normal = self.new_block(span, None)?;
         let panic = self.abnormal(ExitKind::Panic)?;

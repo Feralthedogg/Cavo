@@ -70,7 +70,7 @@ pub(crate) fn validate_closure_trait(
     };
     let declaration = method.definition;
     check_signature(program, target, reference, declaration, &selected)?;
-    if !program.definitions[declaration.0 as usize]
+    if !program.definitions[declaration]
         .declaration_clauses
         .is_empty()
     {
@@ -80,16 +80,14 @@ pub(crate) fn validate_closure_trait(
     }
     // These are obligations, not evidence: the effect pass checks the actual
     // generated function against every declared upper bound after lowering.
-    let attributes = program.definitions[declaration.0 as usize]
-        .attributes
-        .clone();
+    let attributes = program.definitions[declaration].attributes.clone();
     for attribute in attributes {
-        if !program.definitions[selected.definition.0 as usize]
+        if !program.definitions[selected.definition]
             .attributes
             .iter()
             .any(|found| found.name == attribute.name && found.arguments == attribute.arguments)
         {
-            program.definitions[selected.definition.0 as usize]
+            program.definitions[selected.definition]
                 .attributes
                 .push(attribute);
         }
@@ -108,16 +106,12 @@ fn check_signature(
     arguments.extend_from_slice(&reference.arguments);
     let expected = program
         .types
-        .substitute_generics(
-            program.definitions[declaration.0 as usize].ty,
-            declaration,
-            &arguments,
-        )
+        .substitute_generics(program.definitions[declaration].ty, declaration, &arguments)
         .map_err(|problem| error(&problem.to_string()))?;
     let actual = program
         .types
         .substitute_generics(
-            program.definitions[selected.definition.0 as usize].ty,
+            program.definitions[selected.definition].ty,
             selected.definition,
             &selected.type_arguments,
         )

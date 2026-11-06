@@ -1,4 +1,5 @@
 use super::{Digest, digest::sha256};
+use crate::arena::Access as _;
 use crate::{
     hir,
     source::SourceMap,
@@ -15,8 +16,8 @@ pub struct InterfaceFunction {
 }
 
 pub fn qualified(program: &hir::Program, symbols: &Interner, definition: hir::DefId) -> String {
-    let def = &program.definitions[definition.0 as usize];
-    program.modules[def.module.0 as usize]
+    let def = &program.definitions[definition];
+    program.modules[def.module]
         .path
         .iter()
         .copied()
@@ -68,7 +69,7 @@ impl Encoder<'_> {
         (self.bytes.len() <= 1_048_576).then(|| sha256(&self.bytes))
     }
     fn nominal_declaration(&mut self, name: &str, definition: hir::DefId) -> Option<()> {
-        let def = &self.program.definitions[definition.0 as usize];
+        let def = &self.program.definitions[definition];
         self.token(name);
         self.number(u64::from(def.type_parameter_count));
         self.token(match def.kind {
@@ -100,11 +101,8 @@ impl Encoder<'_> {
         {
             self.number(enumeration.variants.len() as u64);
             for (index, &variant) in enumeration.variants.iter().enumerate() {
-                self.token(
-                    self.symbols
-                        .get(self.program.definitions[variant.0 as usize].name),
-                );
-                self.ty(self.program.definitions[variant.0 as usize].ty, 0)?;
+                self.token(self.symbols.get(self.program.definitions[variant].name));
+                self.ty(self.program.definitions[variant].ty, 0)?;
                 if self
                     .program
                     .types
@@ -340,7 +338,7 @@ pub fn fingerprint(
     sources: &SourceMap,
     definition: hir::DefId,
 ) -> Option<Digest> {
-    let def = program.definitions.get(definition.0 as usize)?;
+    let def = program.definitions.get_id(definition)?;
     if def.kind != hir::DefinitionKind::Function {
         return None;
     }

@@ -238,13 +238,13 @@ impl Body<'_, '_> {
             .function
             .parameters
             .iter()
-            .map(|local| self.function.locals[local.0 as usize].ty)
+            .map(|local| self.function.locals[local].ty)
             .collect();
         let signature = self.context.program.types.intern(Ty::Function {
             parameters,
             result: self.function.result,
         });
-        self.context.program.definitions[self.definition.0 as usize].ty = signature;
+        self.context.program.definitions[self.definition].ty = signature;
     }
 
     fn rewrite_environment(

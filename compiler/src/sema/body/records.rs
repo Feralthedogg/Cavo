@@ -69,10 +69,25 @@ impl Body<'_, '_> {
                 self.expression(value, None);
             }
         }
-        if construction.initialized.contains(&false) {
+        let union =
+            self.context.definition(construction.definition).kind == hir::DefinitionKind::Union;
+        if union && values.len() != 1 {
+            self.context.error(
+                "E-UNION-INIT",
+                "union construction must select exactly one active field",
+                span,
+            );
+        } else if !union && construction.initialized.contains(&false) {
             self.context.error(
                 "E-FIELD-MISSING",
                 "record literal must initialize every field",
+                span,
+            );
+        }
+        if union && self.contract_depth == 0 {
+            self.context.error(
+                "E-CONTRACT-BOUNDARY",
+                "union construction requires a contract boundary",
                 span,
             );
         }
@@ -116,6 +131,14 @@ impl Body<'_, '_> {
             );
             return None;
         };
+        if self.context.program.tasks.task == Some(definition) {
+            self.context.error(
+                "E-TASK-CONSTRUCT",
+                "task handles can only be created by checked task admission",
+                span,
+            );
+            return None;
+        }
         let mut inferred = self.record_parameters(definition);
         if seed == Seed::Fixed {
             inferred
@@ -193,9 +216,11 @@ impl Body<'_, '_> {
                 name.span,
             );
         }
-        if visibility == ast::Visibility::Private
-            && self.context.definition(construction.definition).module != self.module
-        {
+        if !self.context.visible(
+            visibility,
+            self.context.definition(construction.definition).module,
+            self.module,
+        ) {
             self.context.error(
                 "E-NAME-PRIVATE",
                 "cannot initialize private field",

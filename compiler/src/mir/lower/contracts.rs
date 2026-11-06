@@ -10,20 +10,12 @@ impl Builder<'_> {
         if self.source.clauses.is_empty() {
             return Ok(());
         }
-        let declaration = &self.program.definitions[self.source.definition.0 as usize];
-        let origin = declaration.const_origin.unwrap_or(self.source.definition);
-        if !self.program.constants.functions.contains_key(&origin) {
-            return self.fail(
-                self.source.body.span,
-                "runtime contract lowering requires a checked const function",
-            );
-        }
         let mut old = BTreeSet::new();
         for clause in &self.source.clauses {
-            self.contract_observations(clause.predicate, clause.result_local, &mut old)?;
             if let Some(result) = clause.result_local {
                 self.sources[result.0 as usize] = Some(self.body.return_local);
             }
+            self.contract_observations(clause.predicate, clause.result_local, &mut old)?;
         }
         for index in old {
             let source = hir::LocalId(index);
@@ -50,7 +42,7 @@ impl Builder<'_> {
         let mut pending = vec![(root, false)];
         let mut remaining = 200_000usize;
         while let Some((id, entry)) = pending.pop() {
-            let expression = &self.source.expressions[id.0 as usize];
+            let expression = &self.source.expressions[id];
             if remaining == 0 {
                 return self.fail(
                     expression.span,
@@ -61,8 +53,7 @@ impl Builder<'_> {
             match &expression.kind {
                 H::Local(local) => {
                     let property = self.properties.get(expression.ty);
-                    if !property.copy
-                        || property.references
+                    if entry && (!property.copy || property.references)
                         || (!self.source.parameters.contains(local) && Some(*local) != result)
                     {
                         return self.fail(expression.span, "runtime const contracts may observe only Copy values without references from parameters or result");
@@ -103,8 +94,16 @@ impl Builder<'_> {
             H::Call {
                 callee, arguments, ..
             } => {
-                self.require_const_callee(*callee, span)?;
-                pending.push((*callee, entry));
+                let logical = match self.source.expressions[callee].kind {
+                    H::Definition(definition) => {
+                        self.program.contracts.predicates.contains_key(&definition)
+                    }
+                    _ => false,
+                };
+                if !logical {
+                    self.require_pure_callee(*callee, span)?;
+                    pending.push((*callee, entry));
+                }
                 pending.extend(arguments.iter().map(|&value| (value, entry)));
             }
             _ => {
@@ -117,15 +116,12 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn require_const_callee(&self, mut callee: hir::ExprId, span: Span) -> Result<(), LowerError> {
+    fn require_pure_callee(&self, mut callee: hir::ExprId, span: Span) -> Result<(), LowerError> {
         for _ in 0..128 {
-            match self.source.expressions[callee.0 as usize].kind {
+            match self.source.expressions[callee].kind {
                 H::Group(inner) => callee = inner,
                 H::Definition(definition) => {
-                    let origin = self.program.definitions[definition.0 as usize]
-                        .const_origin
-                        .unwrap_or(definition);
-                    if self.program.constants.functions.contains_key(&origin) {
+                    if crate::contracts::purity::eligible(self.program, definition) {
                         return Ok(());
                     }
                     break;
@@ -135,7 +131,7 @@ impl Builder<'_> {
         }
         self.fail(
             span,
-            "runtime const contract calls require checked const source functions",
+            "contract calls require checked pure, nosuspend and noalloc source functions",
         )
     }
 
@@ -144,7 +140,22 @@ impl Builder<'_> {
             if clause.kind != kind {
                 continue;
             }
-            let span = self.source.expressions[clause.predicate.0 as usize].span;
+            if self.is_logical(clause.predicate) {
+                let action = if kind == ClauseKind::Requires {
+                    crate::contracts::Action::Precondition
+                } else {
+                    crate::contracts::Action::Postcondition
+                };
+                self.logical_clause(
+                    self.source,
+                    clause.predicate,
+                    &HashMap::new(),
+                    action,
+                    &mut Vec::new(),
+                )?;
+                continue;
+            }
+            let span = self.source.expressions[clause.predicate].span;
             self.enter(span)?;
             let condition = self.eval(clause.predicate)?;
             let passed = self.new_block(span, None)?;

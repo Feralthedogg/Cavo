@@ -52,7 +52,7 @@ impl Builder<'_> {
         span: Span,
     ) -> Result<Vec<TyId>, Error> {
         let fields: Vec<_> = if let Some(index) = self.record_indices[definition.0 as usize] {
-            if self.program.definitions[definition.0 as usize].kind == hir::DefinitionKind::Union {
+            if self.program.definitions[definition].kind == hir::DefinitionKind::Union {
                 return Ok(Vec::new());
             }
             self.program.records[index]
@@ -65,7 +65,7 @@ impl Builder<'_> {
                 .variants
                 .iter()
                 .flat_map(|variant| {
-                    let ty = self.program.definitions[variant.0 as usize].ty;
+                    let ty = self.program.definitions[variant].ty;
                     match self.program.types.get(ty) {
                         Ty::Function { parameters, .. } => parameters.clone(),
                         _ => Vec::new(),

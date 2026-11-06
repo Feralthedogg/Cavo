@@ -47,8 +47,7 @@ fn validate_type(program: &Program, index: usize, ty: &Ty) -> Result<(), Invaria
         } => {
             arguments_for(program, *trait_definition, arguments)?;
             require(
-                program.definitions[trait_definition.0 as usize].kind
-                    == crate::hir::DefinitionKind::Trait,
+                program.definitions[trait_definition].kind == crate::hir::DefinitionKind::Trait,
                 "dynamic type must name a trait",
             )?;
         }
@@ -202,8 +201,7 @@ fn validate_constant(
         } => {
             arguments_for(program, *definition, type_arguments)?;
             require(
-                program.definitions[definition.0 as usize].kind
-                    == crate::hir::DefinitionKind::Function,
+                program.definitions[definition].kind == crate::hir::DefinitionKind::Function,
                 "constant call must target a function",
             )?;
         }

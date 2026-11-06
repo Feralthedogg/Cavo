@@ -77,7 +77,7 @@ impl Places {
         for block in &graph.blocks {
             for operation in &block.operations {
                 if let cfg::Operation::IterationStart { slot, value, .. } = *operation {
-                    places.types[slot.0 as usize] = function.expressions[value.0 as usize].ty;
+                    places.types[slot.0 as usize] = function.expressions[value].ty;
                 }
             }
         }
@@ -266,18 +266,18 @@ impl Places {
         if depth >= MAX_DEPTH as usize {
             return None;
         }
-        match function.expressions[id.0 as usize].kind {
+        match function.expressions[id].kind {
             hir::ExprKind::Local(local) => Some((Self::root(local), true)),
             hir::ExprKind::Group(inner) => self.direct_inner(function, program, inner, depth + 1),
             hir::ExprKind::Field { base, .. } | hir::ExprKind::Index { base, .. } => {
                 if matches!(
-                    program.types.get(function.expressions[base.0 as usize].ty),
+                    program.types.get(function.expressions[base].ty),
                     Ty::Reference { .. }
                 ) {
                     return None;
                 }
                 let (place, precise) = self.direct_inner(function, program, base, depth + 1)?;
-                match function.expressions[id.0 as usize].kind {
+                match function.expressions[id].kind {
                     hir::ExprKind::Field { index, .. } if precise => {
                         Some((*self.fields.get(&(place, index))?, true))
                     }

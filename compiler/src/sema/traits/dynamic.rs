@@ -29,7 +29,7 @@ pub(crate) fn object_safe_method(
     program: &hir::Program,
     method: ObjectMethod,
 ) -> Result<(), DynamicError> {
-    let declaration = &program.definitions[method.definition.0 as usize];
+    let declaration = &program.definitions[method.definition];
     let span = declaration.span;
     if declaration.generic_parameter_kinds.len() > TYPE_WORK_LIMIT {
         return Err(error(
@@ -73,13 +73,13 @@ pub(crate) fn plan_vtable(
 ) -> Result<hir::traits::Vtable, DynamicError> {
     hir::traits::require_trait(program, concrete, trait_ref).map_err(|problem| {
         error(
-            program.definitions[trait_ref.definition.0 as usize].span,
+            program.definitions[trait_ref.definition].span,
             problem.to_string(),
         )
     })?;
     let references = hir::traits::supertraits(program, trait_ref).map_err(|problem| {
         error(
-            program.definitions[trait_ref.definition.0 as usize].span,
+            program.definitions[trait_ref.definition].span,
             problem.to_string(),
         )
     })?;
@@ -92,7 +92,7 @@ pub(crate) fn plan_vtable(
             .find(|trait_| trait_.definition == reference.definition)
             .ok_or_else(|| {
                 error(
-                    program.definitions[reference.definition.0 as usize].span,
+                    program.definitions[reference.definition].span,
                     "dyn requires a declared trait",
                 )
             })?;
@@ -100,7 +100,7 @@ pub(crate) fn plan_vtable(
         for method in methods {
             if slots.len() >= TYPE_WORK_LIMIT || !seen.insert(method.definition) {
                 return Err(error(
-                    program.definitions[method.definition.0 as usize].span,
+                    program.definitions[method.definition].span,
                     "dyn vtable has ambiguous or excessive inherited methods",
                 ));
             }
@@ -146,7 +146,7 @@ fn vtable_slot(
     method: DefId,
     inherited_parameters: u32,
 ) -> Result<hir::traits::VtableSlot, DynamicError> {
-    let span = program.definitions[method.0 as usize].span;
+    let span = program.definitions[method].span;
     let arguments = method_arguments(program, trait_ref, concrete, method, inherited_parameters)?;
     let selected = hir::traits::select_method(program, method, &arguments)
         .map_err(|_| {
@@ -161,7 +161,7 @@ fn vtable_slot(
                 "dyn conversion requires a matching trait implementation",
             )
         })?;
-    let declaration = program.definitions[method.0 as usize].ty;
+    let declaration = program.definitions[method].ty;
     hir::traits::check_bounds(program, selected.definition, &selected.type_arguments)
         .map_err(|problem| error(span, problem.to_string()))?;
     let signature = program.types.substitute(declaration, method, &arguments);
@@ -181,7 +181,7 @@ fn method_arguments(
     method: DefId,
     inherited_parameters: u32,
 ) -> Result<Vec<GenericArg>, DynamicError> {
-    let declaration = &program.definitions[method.0 as usize];
+    let declaration = &program.definitions[method];
     if declaration.generic_parameter_kinds.len() > TYPE_WORK_LIMIT {
         return Err(error(
             declaration.span,
@@ -216,7 +216,7 @@ fn check_slot_signature(
     selected: &hir::traits::MethodSelection,
     span: Span,
 ) -> Result<(), DynamicError> {
-    let implementation = &program.definitions[selected.definition.0 as usize];
+    let implementation = &program.definitions[selected.definition];
     let actual = program.types.substitute(
         implementation.ty,
         selected.definition,

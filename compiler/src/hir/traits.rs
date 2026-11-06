@@ -1,6 +1,7 @@
 //! Declaration identities and implementation witnesses for static/dynamic dispatch.
 
 use super::DefId;
+use crate::arena::Access as _;
 use crate::types::{GenericArg, TyId};
 mod callable;
 mod verify;
@@ -23,7 +24,7 @@ pub fn parameter_has_role(
     index: u32,
     role: LanguageItem,
 ) -> bool {
-    let Some(definition) = program.definitions.get(owner.0 as usize) else {
+    let Some(definition) = program.definitions.get_id(owner) else {
         return false;
     };
     let mut pending: Vec<_> = definition
@@ -57,6 +58,10 @@ pub fn parameter_has_role(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageItem {
+    Send,
+    Sync,
+    TaskTransfer,
+    SuspendSafe,
     Copy,
     Drop,
     From,

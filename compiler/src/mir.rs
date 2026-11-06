@@ -28,9 +28,9 @@ use crate::{
     types::{GenericArg, TyId},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalId(pub u32);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub u32);
@@ -62,6 +62,7 @@ pub struct Local {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalKind {
+    TaskRegistry,
     Return,
     Parameter,
     Source,
@@ -180,6 +181,8 @@ pub struct Statement {
 }
 #[derive(Debug)]
 pub enum StatementKind {
+    RegistryStart(LocalId),
+    Contract(crate::contracts::Statement),
     EnterScope(ScopeId),
     ExitScope(ScopeId),
     StorageLive(LocalId),
@@ -213,6 +216,27 @@ pub struct Block {
 
 #[derive(Debug)]
 pub enum Terminator {
+    Spawn {
+        scope: ScopeId,
+        registry: LocalId,
+        callee: Operand,
+        type_arguments: Vec<GenericArg>,
+        arguments: Vec<Operand>,
+        parameter_types: Vec<TyId>,
+        child_result: TyId,
+        capture_type: TyId,
+        destination: Place,
+        normal: BlockId,
+        panic: BlockId,
+        cancel: BlockId,
+    },
+    TaskDrain {
+        scope: ScopeId,
+        registry: LocalId,
+        exit: tasks::ScopeExit,
+        next: BlockId,
+        abort: BlockId,
+    },
     Goto(BlockId),
     /// Some initializes destination and consumes exactly one element. None
     /// leaves it uninitialized; cleanup drops only the iterator's remaining tail.
@@ -276,9 +300,9 @@ pub enum Terminator {
 
 impl Body {
     pub fn block(&self, id: BlockId) -> &Block {
-        &self.blocks[id.0 as usize]
+        &self.blocks[id]
     }
     pub fn local(&self, id: LocalId) -> &Local {
-        &self.locals[id.0 as usize]
+        &self.locals[id]
     }
 }

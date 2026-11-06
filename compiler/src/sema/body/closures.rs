@@ -104,7 +104,7 @@ impl Body<'_, '_> {
     }
 
     fn capture_value(&mut self, capture: &ast::Capture, local: LocalId) -> Capture {
-        let binding = &self.function.locals[local.0 as usize];
+        let binding = &self.function.locals[local];
         let body_ty = binding.ty;
         if capture.mode == ast::CaptureMode::Mutable && !binding.mutable {
             self.context.error(
@@ -160,12 +160,12 @@ impl Body<'_, '_> {
         self.inherit_closure_generics(environment, span);
         self.inherit_closure_generics(function, span);
         let template = self.environment_type(environment, environment);
-        self.context.program.definitions[environment.0 as usize].ty = template;
+        self.context.program.definitions[environment].ty = template;
         let signature = self.context.program.types.intern(Ty::Function {
             parameters: Vec::new(),
             result: TyId::VOID,
         });
-        self.context.program.definitions[function.0 as usize].ty = signature;
+        self.context.program.definitions[function].ty = signature;
         let arguments = self.context.program.types.generic_arguments(environment);
         let fields = captures
             .iter()
@@ -198,7 +198,7 @@ impl Body<'_, '_> {
         }
     }
 
-    fn environment_type(&mut self, environment: DefId, argument_owner: DefId) -> TyId {
+    pub(super) fn environment_type(&mut self, environment: DefId, argument_owner: DefId) -> TyId {
         let arguments = self.context.program.types.generic_arguments(argument_owner);
         self.context.program.types.intern(Ty::Named {
             definition: environment,
@@ -206,7 +206,7 @@ impl Body<'_, '_> {
         })
     }
 
-    fn inherit_closure_generics(&mut self, owner: DefId, span: Span) {
+    pub(super) fn inherit_closure_generics(&mut self, owner: DefId, span: Span) {
         let parent = self.context.definition(self.definition);
         let parameters = self
             .context
@@ -249,7 +249,7 @@ impl Body<'_, '_> {
             .iter()
             .filter_map(|&(name, kind)| (kind == GenericParamKind::Type).then_some(name))
             .collect();
-        let definition = &mut self.context.program.definitions[owner.0 as usize];
+        let definition = &mut self.context.program.definitions[owner];
         definition.type_parameter_count = names.len() as u32;
         definition.generic_parameter_kinds = kinds;
         definition.lifetime_parameters = lifetimes;
@@ -259,7 +259,7 @@ impl Body<'_, '_> {
             .insert(owner, parameters.iter().map(|&(name, _)| name).collect());
     }
 
-    fn closure_substitute(
+    pub(super) fn closure_substitute(
         &mut self,
         ty: TyId,
         owner: DefId,

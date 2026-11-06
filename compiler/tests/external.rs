@@ -515,6 +515,52 @@ fn fingerprints_are_independent_of_arena_ids_and_lifetime_spelling() {
 }
 
 #[test]
+fn fingerprints_track_const_kinds_and_resolved_layout_dependencies() {
+    let signature = |source: &str| {
+        let mut compilation = parsed(source);
+        let program = compilation
+            .check_types()
+            .unwrap_or_else(|| panic!("{:#?}", compilation.diagnostics));
+        interface::interfaces(&program, &compilation.symbols, &compilation.sources)
+            .unwrap()
+            .remove(0)
+            .signature
+    };
+    assert_ne!(
+        signature("void external<T>();"),
+        signature("void external<const usize N>();")
+    );
+    let align = "const usize ALIGN = 4; @align(ALIGN) struct Value { i32 value; } void external(&Value value);";
+    assert_ne!(
+        signature(align),
+        signature(&align.replace("ALIGN = 4", "ALIGN = 8"))
+    );
+    let tags =
+        "const usize TAG = 2; enum Value { First = TAG, Second } void external(Value value);";
+    assert_ne!(
+        signature(tags),
+        signature(&tags.replace("TAG = 2", "TAG = 7"))
+    );
+}
+
+#[test]
+fn schema_one_cannot_grant_unused_type_or_const_generic_obligations() {
+    let effects = PURE.replace("\"reads\":[0]", "\"reads\":[]");
+    for source in ["void external<T>();", "void external<const usize N>();"] {
+        let mut compilation = loaded(source, "", &effects, true);
+        assert!(compilation.check().is_none());
+        assert!(
+            compilation
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E-SUMMARY-EFFECT"),
+            "{:#?}",
+            compilation.diagnostics
+        );
+    }
+}
+
+#[test]
 fn report_support_ids_cannot_reference_an_untrusted_or_missing_summary() {
     let (mut c, p) = checked(loaded(
         "extern \"C\" { i32 read(&i32 x); } i32 f() { i32 x=1; return read(&x); }",

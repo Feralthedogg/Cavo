@@ -17,6 +17,11 @@ impl Signatures {
                     callee: Operand::Function { definition, .. },
                     type_arguments,
                     ..
+                }
+                | Terminator::Spawn {
+                    callee: Operand::Function { definition, .. },
+                    type_arguments,
+                    ..
                 } = &block.terminator
                 {
                     let signatures = result.direct.entry(*definition).or_default();
@@ -75,7 +80,7 @@ impl Signatures {
             for method in methods {
                 let mut arguments = vec![GenericArg::Type(ty)];
                 arguments.extend(&trait_ref.arguments);
-                let kinds = hir.definitions[method.definition.0 as usize]
+                let kinds = hir.definitions[method.definition]
                     .generic_parameter_kinds
                     .clone();
                 for kind in &kinds[arguments.len().min(kinds.len())..] {
@@ -218,7 +223,7 @@ impl Verifier<'_> {
             return fail("call operand is not callable");
         };
         self.argument_types(parameters, arguments, supplied)?;
-        self.compatible(self.place(destination)?, *result)
+        self.compatible(self.value_place(destination)?, *result)
     }
 
     fn argument_types(

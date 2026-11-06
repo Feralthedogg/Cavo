@@ -2,6 +2,7 @@ use super::*;
 mod calls;
 mod flow;
 mod operations;
+mod task_scopes;
 use crate::{local::properties::Properties, types::Ty};
 use std::{collections::HashSet, fmt};
 
@@ -391,7 +392,7 @@ impl Verifier<'_> {
                 require(valid, "invalid MIR binary operation")
             }
             Rvalue::Borrow { mutable, place } => {
-                let actual = self.place(place)?;
+                let actual = self.value_place(place)?;
                 match self.ty(expected)? {
                     Ty::Reference {
                         inner,
@@ -432,7 +433,11 @@ impl Verifier<'_> {
                     .fields(expected)
                     .ok_or_else(|| InvariantError::new("aggregate is not a record".into()))?;
                 require(
-                    fields.len() == expected_fields.len(),
+                    if self.properties.union(expected) {
+                        fields.len() == 1
+                    } else {
+                        fields.len() == expected_fields.len()
+                    },
                     "record aggregate is incomplete",
                 )?;
                 let mut seen = HashSet::new();
@@ -576,7 +581,7 @@ impl Verifier<'_> {
             "MIR parameter count mismatch",
         )?;
         for (actual, expected) in parameters.into_iter().zip(&source.parameters) {
-            self.compatible(actual, source.locals[expected.0 as usize].ty)?;
+            self.compatible(actual, source.locals[expected].ty)?;
         }
         for (index, scope) in self.body.scopes.iter().enumerate() {
             require(
@@ -621,6 +626,23 @@ impl Verifier<'_> {
     fn block_structure(&self, block: &Block) -> Result<(), InvariantError> {
         for statement in &block.statements {
             match &statement.kind {
+                StatementKind::RegistryStart(local) => {
+                    require(
+                        self.local(*local)?.kind == LocalKind::TaskRegistry,
+                        "registry_start requires internal registry storage",
+                    )?;
+                }
+                StatementKind::Contract(contract) => {
+                    for argument in &contract.atom.arguments {
+                        self.operand(argument)?;
+                    }
+                    if let crate::contracts::Action::Assume { reason } = &contract.action {
+                        require(
+                            !reason.trim().is_empty(),
+                            "contract assumption has no justification",
+                        )?;
+                    }
+                }
                 StatementKind::IteratorStart { iterator, value } => {
                     self.iterator_element(*iterator)?;
                     self.compatible(self.operand(value)?, self.local(*iterator)?.ty)?;
@@ -645,6 +667,23 @@ impl Verifier<'_> {
             }
         }
         match &block.terminator {
+            Terminator::Spawn { .. } => self.spawn_structure(&block.terminator)?,
+            Terminator::TaskDrain {
+                scope,
+                registry,
+                next,
+                abort,
+                exit,
+            } => {
+                self.task_registry(*scope, *registry)?;
+                self.block(*next)?;
+                require(
+                    matches!(self.block(*abort)?.terminator, Terminator::Abort),
+                    "fatal scope drain failure must abort",
+                )?;
+                super::tasks::lower_scope(self.body, *scope, *exit)
+                    .map_err(|e| InvariantError::new(e.to_string()))?;
+            }
             Terminator::Goto(target) => {
                 self.block(*target)?;
             }

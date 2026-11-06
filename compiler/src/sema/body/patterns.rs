@@ -84,7 +84,7 @@ impl Body<'_, '_> {
     fn retag_diverging(&mut self, value: ExprId, ty: TyId) {
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {
-            let expression = &mut self.function.expressions[value.0 as usize];
+            let expression = &mut self.function.expressions[value];
             expression.ty = ty;
             match &expression.kind {
                 H::Group(inner) => pending.push(*inner),
@@ -374,7 +374,7 @@ impl Body<'_, '_> {
             if !seen.insert(id) {
                 continue;
             }
-            match &self.function.statements[id.0 as usize].kind {
+            match &self.function.statements[id].kind {
                 S::Declare { initializer, .. } | S::Return(initializer) => {
                     expressions.extend(initializer)
                 }
@@ -455,7 +455,7 @@ impl Body<'_, '_> {
     }
 
     fn statement_diverges(&self, statement: StmtId) -> bool {
-        match &self.function.statements[statement.0 as usize].kind {
+        match &self.function.statements[statement].kind {
             S::Return(_) => true,
             S::Block(body) => self.block_diverges(body),
             S::Expression(value) => self.expression_diverges(*value),

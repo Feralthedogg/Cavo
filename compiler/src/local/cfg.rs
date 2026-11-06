@@ -179,7 +179,7 @@ impl Graph {
         for &local in &function.parameters {
             let event = builder.event(
                 EventKind::Parameter,
-                function.locals[local.0 as usize].span,
+                function.locals[local].span,
                 Some(local),
             );
             builder.emit(Operation::Parameter { local, event });
@@ -266,7 +266,7 @@ impl Graph {
 pub(super) fn constant_bool(function: &hir::Function, mut id: ExprId) -> Option<bool> {
     let mut invert = false;
     for _ in 0..128 {
-        match function.expressions[id.0 as usize].kind {
+        match function.expressions[id].kind {
             hir::ExprKind::Constant(hir::Constant::Bool(value)) => return Some(value != invert),
             hir::ExprKind::Group(inner) => id = inner,
             hir::ExprKind::Unary {
@@ -333,8 +333,7 @@ impl Builder<'_> {
             }
             let Cleanup::Local(local) = action else {
                 if let Cleanup::Defer(id) = action
-                    && let StmtKind::Defer { body, .. } =
-                        &self.function.statements[id.0 as usize].kind
+                    && let StmtKind::Defer { body, .. } = &self.function.statements[id].kind
                 {
                     self.block(body);
                 }
@@ -395,8 +394,13 @@ impl Builder<'_> {
     }
     fn statement_inner(&mut self, id: hir::StmtId) {
         let function = self.function;
-        let statement = &function.statements[id.0 as usize];
+        let statement = &function.statements[id];
         match &statement.kind {
+            StmtKind::Assume(_) | StmtKind::TaskScope { .. } => {
+                // The public local entry rejects this form; only execution MIR
+                // can retain and validate its proof and invalidation events.
+                self.terminate(Exit::Stop);
+            }
             StmtKind::Declare { local, initializer } => {
                 self.scopes
                     .last_mut()

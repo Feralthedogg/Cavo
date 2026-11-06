@@ -1,7 +1,7 @@
 //! Versioned external assumptions. Loading a document never grants it trust.
 pub mod digest;
 pub mod interface;
-mod json;
+pub(crate) mod json;
 mod memory;
 
 use crate::{
@@ -188,7 +188,7 @@ impl Summaries {
                     );
                     continue;
                 };
-                let def = &program.definitions[id.0 as usize];
+                let def = &program.definitions[id];
                 let expected = interface::fingerprint(program, symbols, sources, id);
                 if program.functions.iter().any(|f| f.definition == id)
                     || !seen.insert(id)
@@ -273,8 +273,7 @@ impl Bindings {
             let contract = contracts[id.0 as usize]
                 .as_mut()
                 .expect("function region contract");
-            let Ty::Function { parameters, result } =
-                program.types.get(program.definitions[id.0 as usize].ty)
+            let Ty::Function { parameters, result } = program.types.get(program.definitions[id].ty)
             else {
                 continue;
             };
@@ -314,16 +313,13 @@ impl Bindings {
                     .not_established
                     .push("reference-store effects are unknown".into());
             }
-            if !program.definitions[id.0 as usize]
-                .declaration_clauses
-                .is_empty()
-            {
+            if !program.definitions[id].declaration_clauses.is_empty() {
                 record.not_established.push(
                     "declared requires/ensures clauses need a conditional effect proof".into(),
                 );
             }
             let mut valid = contract.valid && record.not_established.is_empty();
-            valid &= program.definitions[id.0 as usize]
+            valid &= program.definitions[id]
                 .generic_parameter_kinds
                 .iter()
                 .all(|kind| *kind == crate::types::GenericParamKind::Lifetime);
@@ -436,7 +432,7 @@ impl Bindings {
                     record.not_established.push("memory access, signature validity, or return paths require an unsupported contract".into());
                 }
                 let mut diagnostic=Diagnostic::error("E-SUMMARY-EFFECT","external summary contains an unknown or unsupported effect or return contract",record.source)
-                    .label(program.definitions[id.0 as usize].span,"no external safety result was approved for this declaration")
+                    .label(program.definitions[id].span,"no external safety result was approved for this declaration")
                     .note("this stage models no-retain/no-free/no-callback calls, read access, scalar writes preserving validity, and input-tied reference returns");
                 diagnostic
                     .notes

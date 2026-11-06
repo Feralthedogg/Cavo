@@ -321,13 +321,21 @@ impl Walker<'_> {
             return None;
         }
         let nested = usize::from(!matches!(
-            self.function.expressions[id.0 as usize].kind,
+            self.function.expressions[id].kind,
             H::Binary { .. }
         ));
         self.depth += nested;
         self.expression_frames += 1;
         let function = self.function;
-        match &function.expressions[id.0 as usize].kind {
+        match &function.expressions[id].kind {
+            H::Spawn {
+                callee, arguments, ..
+            } => {
+                self.expr(*callee, live)?;
+                for &argument in arguments {
+                    self.expr(argument, live)?;
+                }
+            }
             H::Local(_)
             | H::Field { .. }
             | H::Index { .. }
@@ -402,16 +410,14 @@ impl Walker<'_> {
             self.mark(place, live);
         }
         let function = self.function;
-        match function.expressions[id.0 as usize].kind {
+        match function.expressions[id].kind {
             H::Group(inner) => self.access(inner, false, live)?,
             H::Field { base, .. } | H::Index { base, .. } => {
-                if let H::Index { index, .. } = function.expressions[id.0 as usize].kind {
+                if let H::Index { index, .. } = function.expressions[id].kind {
                     self.expr(index, live)?;
                 }
                 if matches!(
-                    self.program
-                        .types
-                        .get(function.expressions[base.0 as usize].ty),
+                    self.program.types.get(function.expressions[base].ty),
                     Ty::Reference { .. }
                 ) || self.places.direct(function, self.program, base).is_none()
                 {

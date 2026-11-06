@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(super) enum Json {
+pub(crate) enum Json {
     Null,
     Bool(bool),
     Number(u64),
@@ -11,20 +11,40 @@ pub(super) enum Json {
     Object(BTreeMap<String, Json>),
 }
 pub(super) fn parse(text: &str) -> Result<Json, String> {
-    if text.len() > 262_144 {
-        return Err("summary exceeds the 256 KiB limit".into());
+    parse_bounded(text, 262_144, 4096)
+}
+
+pub(crate) fn parse_bounded(text: &str, bytes: usize, nodes: usize) -> Result<Json, String> {
+    if text.len() > bytes {
+        return Err("JSON document exceeds its byte limit".into());
     }
-    let mut parser = Parser {
-        text,
-        at: 0,
-        nodes: 4096,
-    };
+    let mut parser = Parser { text, at: 0, nodes };
     let value = parser.value(0)?;
     parser.space();
     if parser.at != text.len() {
         return Err(parser.error("trailing content"));
     }
     Ok(value)
+}
+
+pub(crate) fn quote(text: &str) -> String {
+    use std::fmt::Write;
+    let mut output = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch < ' ' => {
+                let _ = write!(output, "\\u{:04x}", ch as u32);
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+    output
 }
 struct Parser<'a> {
     text: &'a str,

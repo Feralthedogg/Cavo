@@ -38,9 +38,7 @@ fn move_capture_of_copy_data_remains_a_reusable_shared_callable() {
         [hir::ClosureKind::FnMut, hir::ClosureKind::FnOnce]
     );
     let closure = &hir.closures[0];
-    let Ty::Function { parameters, .. } = hir
-        .types
-        .get(hir.definitions[closure.function.0 as usize].ty)
+    let Ty::Function { parameters, .. } = hir.types.get(hir.definitions[closure.function].ty)
     else {
         panic!("closure entry signature");
     };
@@ -175,7 +173,7 @@ fn generated_closure_functions_keep_the_owners_copy_bound() {
             .iter()
             .map(|(_, definition)| *definition),
     ) {
-        assert_eq!(hir.definitions[definition.0 as usize].bounds.len(), 1);
+        assert_eq!(hir.definitions[definition].bounds.len(), 1);
     }
 }
 

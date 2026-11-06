@@ -22,9 +22,11 @@ impl Program {
         let types = self.types.values().len();
         types::validate(self)?;
         program::metadata(self)?;
+        crate::contracts::validate_hir(self)?;
         for function in &self.functions {
             self.validate_function(function, types)?;
         }
+        crate::tasks::validate_hir(self)?;
         crate::hir::traits::validate(self)?;
         self.validate_closures()?;
         self.constants
@@ -124,6 +126,9 @@ fn expr_children(kind: &ExprKind, visit: &mut dyn FnMut(ExprId)) {
         }
         ExprKind::Call {
             callee, arguments, ..
+        }
+        | ExprKind::Spawn {
+            callee, arguments, ..
         } => {
             visit(*callee);
             for &argument in arguments {
@@ -176,6 +181,7 @@ fn expr_children(kind: &ExprKind, visit: &mut dyn FnMut(ExprId)) {
 
 fn stmt_expressions(kind: &StmtKind, visit: &mut dyn FnMut(ExprId)) {
     match kind {
+        StmtKind::Assume(assumption) => visit(assumption.predicate),
         StmtKind::Defer { captures, .. } => {
             for &(_, initializer) in captures {
                 visit(initializer);
@@ -209,6 +215,7 @@ fn stmt_children(kind: &StmtKind, visit: &mut dyn FnMut(StmtId)) {
     };
     match kind {
         StmtKind::Block(body)
+        | StmtKind::TaskScope { body, .. }
         | StmtKind::Defer { body, .. }
         | StmtKind::While { body, .. }
         | StmtKind::ForIn { body, .. } => block(body),

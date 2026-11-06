@@ -23,7 +23,10 @@ impl Paths {
             leaves: 0,
         };
         for local in &body.locals {
-            let root = if matches!(local.kind, LocalKind::Address | LocalKind::ArrayIterator) {
+            let root = if matches!(
+                local.kind,
+                LocalKind::Address | LocalKind::ArrayIterator | LocalKind::TaskRegistry
+            ) {
                 paths.scalar(false)?
             } else {
                 paths.add(local.ty, properties, 0)?
@@ -61,6 +64,12 @@ impl Paths {
     ) -> Result<usize, InvariantError> {
         require(depth < 128, "owned move-path depth limit exceeded")?;
         let id = self.node(properties.user_drop(ty))?;
+        if properties.union(ty) {
+            self.leaves += 1;
+            self.nodes[id].leaves.end = self.leaves;
+            self.nodes[id].fields = vec![id; properties.fields(ty).map_or(0, |f| f.len())];
+            return Ok(id);
+        }
         if let Some(variants) = properties.enum_variants(ty) {
             self.nodes[id].tag = Some(self.leaves);
             self.leaves += 1;

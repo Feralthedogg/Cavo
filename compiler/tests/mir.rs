@@ -75,7 +75,7 @@ impl<'a> Path<'a> {
             .find(|body| {
                 compilation
                     .symbols
-                    .get(hir.definitions[body.definition.0 as usize].name)
+                    .get(hir.definitions[body.definition].name)
                     == name
             })
             .expect("function");
@@ -262,6 +262,10 @@ impl<'a> Path<'a> {
             let block = self.body.block(next);
             for statement in &block.statements {
                 match &statement.kind {
+                    mir::StatementKind::RegistryStart(_) => {
+                        panic!("task registries use the task protocol observer")
+                    }
+                    mir::StatementKind::Contract(_) => {}
                     mir::StatementKind::IteratorStart { .. } => {
                         panic!("owned iteration uses the pattern observer")
                     }
@@ -320,7 +324,7 @@ impl<'a> Path<'a> {
                     let name = self
                         .compilation
                         .symbols
-                        .get(self.hir.definitions[definition.0 as usize].name);
+                        .get(self.hir.definitions[definition].name);
                     let arguments = arguments
                         .iter()
                         .map(|argument| self.operand(argument))
@@ -584,7 +588,7 @@ fn mutable_reference_callbacks_preserve_the_function_pointer_and_argument() {
         .find(|function| {
             compilation
                 .symbols
-                .get(hir.definitions[function.definition.0 as usize].name)
+                .get(hir.definitions[function.definition].name)
                 == "update"
         })
         .unwrap()
@@ -717,7 +721,7 @@ fn continue_and_break_clean_iteration_storage_and_preserve_for_update() {
 fn verifier_rejects_invalid_targets_and_uninitialized_returns() {
     let (_, mut hir, mut mir) = checked("i32 f() { return 1; }");
     let body = &mut mir.functions[0];
-    body.blocks[body.entry.0 as usize].terminator = mir::Terminator::Goto(mir::BlockId(u32::MAX));
+    body.blocks[body.entry].terminator = mir::Terminator::Goto(mir::BlockId(u32::MAX));
     assert!(mir.validate(&mut hir).is_err());
 
     let (_, mut hir, mut mir) = checked("i32 f() { return 1; }");
@@ -735,7 +739,7 @@ fn verifier_rejects_invalid_targets_and_uninitialized_returns() {
 fn verifier_rejects_scope_mismatch_and_early_storage_death() {
     let (_, mut hir, mut mir) = checked("i32 f() { i32 value = 1; return value; }");
     let body = &mut mir.functions[0];
-    let entry = &mut body.blocks[body.entry.0 as usize];
+    let entry = &mut body.blocks[body.entry];
     entry.statements.insert(
         0,
         mir::Statement {
@@ -790,7 +794,7 @@ fn verifier_rejects_reading_a_call_result_on_its_failure_edge() {
             _ => None,
         })
         .unwrap();
-    let block = &mut body.blocks[panic.0 as usize];
+    let block = &mut body.blocks[panic];
     block.statements.insert(
         0,
         mir::Statement {
@@ -813,7 +817,7 @@ fn verifier_rejects_missing_bodies_and_removed_arithmetic_traps() {
     // Even an unused owned parameter arrives initialized and must be cleaned.
     let (_, mut hir, mut mir) = checked("void discard<T>(T input) {}");
     let body = &mut mir.functions[0];
-    body.blocks[body.entry.0 as usize]
+    body.blocks[body.entry]
         .statements
         .retain(|statement| !matches!(statement.kind, mir::StatementKind::Argument(_)));
     assert!(mir.validate(&mut hir).is_err());
@@ -916,7 +920,7 @@ fn verifier_rejects_removed_bounds_checks_and_checks_invalidated_before_use() {
             body.blocks[checked_block].terminator = mir::Terminator::Goto(normal);
         } else {
             let ty = body.local(index).ty;
-            let block = &mut body.blocks[normal.0 as usize];
+            let block = &mut body.blocks[normal];
             block.statements.insert(
                 0,
                 mir::Statement {
@@ -960,7 +964,7 @@ fn many_functions_and_repeated_calls_keep_per_function_limits_and_cleanup_growth
         .find(|body| {
             compilation
                 .symbols
-                .get(hir.definitions[body.definition.0 as usize].name)
+                .get(hir.definitions[body.definition].name)
                 == "many"
         })
         .unwrap();

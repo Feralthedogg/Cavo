@@ -16,6 +16,42 @@ pub use nll::NllReport;
 pub use place::{FieldProjection, Place, PlaceId};
 pub use regions::{RegionContract, RegionInput, RegionStep, RegionTerm};
 
+/// Reuse the schema's declaration checks without building the obsolete source
+/// CFG for functions that are analyzed on execution MIR.
+pub(crate) fn external_reports(
+    program: &mut hir::Program,
+    mut bindings: Bindings,
+    summaries: &Summaries,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<SummaryReport> {
+    let properties = properties::Properties::compute(program);
+    let mut contracts = vec![None; program.definitions.len()];
+    for record in &bindings.reports {
+        let definition = &program.definitions[record.function];
+        let crate::types::Ty::Function { parameters, result } = program.types.get(definition.ty)
+        else {
+            continue;
+        };
+        let (contract, problem) = regions::signature(
+            regions::Signature {
+                definition: record.function,
+                parameters,
+                result: *result,
+                span: definition.span,
+                has_body: false,
+            },
+            program,
+            &properties,
+        );
+        if let Some(problem) = problem {
+            diagnostics.push(problem.diagnostic());
+        }
+        contracts[record.function.0 as usize] = Some(contract);
+    }
+    bindings.apply(&mut contracts, program, diagnostics, summaries);
+    bindings.reports
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

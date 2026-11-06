@@ -227,7 +227,19 @@ impl<'a> Query<'a> {
             Ty::Named {
                 definition,
                 arguments,
-            } => self.named(ty, definition, &arguments, depth),
+            } => {
+                if Some(definition) == self.program.tasks.task {
+                    Ok(Layout {
+                        ty,
+                        size: 16,
+                        alignment: 8,
+                        c_compatible: false,
+                        kind: Kind::Pointer { words: 2 },
+                    })
+                } else {
+                    self.named(ty, definition, &arguments, depth)
+                }
+            }
             Ty::Str | Ty::Slice(_) | Ty::Dynamic { .. } => Err(Error::new(
                 ty,
                 "unsized type has no standalone storage layout",
@@ -335,7 +347,7 @@ impl<'a> Query<'a> {
         arguments: &[GenericArg],
         depth: usize,
     ) -> Result<Layout, Error> {
-        let declaration = self.program.definitions[definition.0 as usize].clone();
+        let declaration = self.program.definitions[definition].clone();
         let union = declaration.kind == hir::DefinitionKind::Union;
         let options = attributes::parse(
             self.program,
@@ -542,7 +554,7 @@ impl<'a> Query<'a> {
         owner: hir::DefId,
         arguments: &[GenericArg],
     ) -> Result<Vec<TyId>, Error> {
-        let ty = self.program.definitions[variant.0 as usize].ty;
+        let ty = self.program.definitions[variant].ty;
         let fields = match self.program.types.get(ty) {
             Ty::Function { parameters, .. } => parameters.clone(),
             _ => Vec::new(),

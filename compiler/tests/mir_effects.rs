@@ -64,7 +64,12 @@ fn declaration_bounds_do_not_approve_unknown_indirect_effects() {
     assert_eq!(report.violations.len(), 1);
     assert_eq!(report.violations[0].definition, invoke);
     for summary in &report.functions {
-        assert!(summary.unknown.contains(&Unknown::IndirectCall));
+        // The implementation retains its uncertainty; callers use the stable
+        // declaration. The failed refinement still rejects the whole program.
+        assert_eq!(
+            summary.unknown.contains(&Unknown::IndirectCall),
+            summary.definition == invoke
+        );
         assert_eq!(summary.bounded, Boundedness::Unknown);
         assert!(!summary.cleanup_safe());
     }
@@ -124,7 +129,7 @@ fn trusted_external_absence_stays_assumed_and_does_not_prove_bounded_cleanup() {
         "extern \"C\" { void native(); } void middle() { native(); } void caller() { middle(); }",
     );
     let native = definition(&compilation, &hir, "native");
-    let assumption = external_assumption(native, hir.definitions[native.0 as usize].span);
+    let assumption = external_assumption(native, hir.definitions[native].span);
     let report = effects::analyze(&mir, &hir, &compilation.symbols, &[assumption]).unwrap();
     for summary in &report.functions {
         assert!(summary.assumptions.contains(&external::AssumptionId(7)));
@@ -179,7 +184,7 @@ fn transformed_cleanup_calls_must_reestablish_bounded_effects() {
     };
     *callee = mir::Operand::Function {
         definition: spin,
-        ty: hir.definitions[spin.0 as usize].ty,
+        ty: hir.definitions[spin].ty,
     };
     mir.validate(&mut hir).unwrap();
     let after = effects::analyze(&mir, &hir, &compilation.symbols, &[]).unwrap();

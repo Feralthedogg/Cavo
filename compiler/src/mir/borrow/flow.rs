@@ -2,6 +2,8 @@ use super::*;
 use std::collections::BTreeMap;
 mod calls;
 mod capture;
+mod intrinsics;
+mod task_scopes;
 use super::summary::Step as Key;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +21,11 @@ type Locations = BTreeSet<Location>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Value {
+    task_fields: BTreeMap<TaskSlot, BTreeSet<Vec<Key>>>,
+    task_paths: BTreeMap<TaskSlot, BTreeSet<Vec<Key>>>,
+    parameters: BTreeMap<Vec<Key>, BTreeSet<summary::ParameterOrigin>>,
+    opaque: bool,
+    tasks: BTreeSet<TaskSlot>,
     fields: BTreeMap<Vec<Key>, Loans>,
     unknown: bool,
     functions: BTreeSet<hir::DefId>,
@@ -28,6 +35,11 @@ impl Value {
     fn loan(loan: LoanId) -> Self {
         Self {
             fields: BTreeMap::from([(Vec::new(), Loans::from([loan]))]),
+            parameters: BTreeMap::new(),
+            opaque: false,
+            tasks: BTreeSet::new(),
+            task_fields: BTreeMap::new(),
+            task_paths: BTreeMap::new(),
             unknown: false,
             functions: BTreeSet::new(),
             vtables: BTreeSet::new(),
@@ -43,6 +55,17 @@ impl Value {
         self.fields.values().flatten().copied().collect()
     }
     fn merge(&mut self, other: Self) {
+        self.opaque |= other.opaque;
+        for (path, sources) in other.parameters {
+            self.parameters.entry(path).or_default().extend(sources);
+        }
+        self.tasks.extend(other.tasks);
+        for (site, paths) in other.task_paths {
+            self.task_paths.entry(site).or_default().extend(paths);
+        }
+        for (site, paths) in other.task_fields {
+            self.task_fields.entry(site).or_default().extend(paths);
+        }
         self.unknown |= other.unknown;
         self.functions.extend(other.functions);
         self.vtables.extend(other.vtables);
@@ -65,14 +88,68 @@ impl Value {
             // field. Keep it instead of turning missing shape into no origin.
             fields.entry(Vec::new()).or_default().extend(self.loans());
         }
+        let task_paths: BTreeMap<_, _> = self
+            .task_paths
+            .iter()
+            .filter_map(|(site, paths)| {
+                let paths: BTreeSet<_> = paths
+                    .iter()
+                    .filter_map(|field| field.strip_prefix(path).map(<[Key]>::to_vec))
+                    .collect();
+                (!paths.is_empty()).then_some((*site, paths))
+            })
+            .collect();
         Self {
             fields,
+            parameters: project_parameters(&self.parameters, path),
+            opaque: self.opaque,
+            tasks: task_paths.keys().copied().collect(),
+            task_paths,
+            task_fields: self
+                .task_fields
+                .iter()
+                .filter_map(|(site, paths)| {
+                    let paths: BTreeSet<_> = paths
+                        .iter()
+                        .filter_map(|field| {
+                            if path.starts_with(field) {
+                                Some(Vec::new())
+                            } else {
+                                field.strip_prefix(path).map(<[Key]>::to_vec)
+                            }
+                        })
+                        .collect();
+                    (!paths.is_empty()).then_some((*site, paths))
+                })
+                .collect(),
             unknown: self.unknown,
             functions: self.functions.clone(),
             vtables: self.vtables.clone(),
         }
     }
     fn insert(&mut self, prefix: &[Key], value: Self) {
+        self.opaque |= value.opaque;
+        for (suffix, origins) in value.parameters {
+            self.parameters
+                .entry(prefix.iter().chain(&suffix).copied().collect())
+                .or_default()
+                .extend(origins);
+        }
+        self.tasks.extend(&value.tasks);
+        for (site, paths) in value.task_paths {
+            self.task_paths.entry(site).or_default().extend(
+                paths
+                    .into_iter()
+                    .map(|path| prefix.iter().chain(&path).copied().collect()),
+            );
+        }
+        for (site, paths) in value.task_fields {
+            self.task_fields.entry(site).or_default().extend(
+                paths
+                    .into_iter()
+                    .map(|path| prefix.iter().chain(&path).copied().collect()),
+            );
+        }
         self.unknown |= value.unknown;
         self.functions.extend(value.functions);
         self.vtables.extend(value.vtables);
@@ -82,13 +159,71 @@ impl Value {
         }
     }
     fn clear(&mut self, path: &[Key]) {
+        if !path.is_empty()
+            && self.opaque
+            && self
+                .parameters
+                .keys()
+                .any(|ancestor| path.starts_with(ancestor))
+        {
+            self.unknown = true;
+        }
+        self.parameters
+            .retain(|field, _| !field.starts_with(path) && !path.starts_with(field));
+        for paths in self.task_fields.values_mut() {
+            paths.retain(|field| !field.starts_with(path));
+        }
+        self.task_fields.retain(|_, paths| !paths.is_empty());
+        self.tasks
+            .retain(|site| self.task_fields.contains_key(site));
         self.fields.retain(|field, _| !field.starts_with(path));
         if path.is_empty() {
+            self.opaque = false;
+            self.tasks.clear();
+            self.task_fields.clear();
+            self.task_paths.clear();
             self.unknown = false;
             self.functions.clear();
             self.vtables.clear();
         }
     }
+
+    fn observe(&mut self, site: TaskSlot) {
+        let Some(paths) = self.task_fields.remove(&site) else {
+            return;
+        };
+        self.fields
+            .retain(|field, _| !paths.iter().any(|path| field.starts_with(path)));
+        self.parameters
+            .retain(|field, _| !paths.iter().any(|path| field.starts_with(path)));
+        self.tasks.remove(&site);
+        self.task_paths.remove(&site);
+    }
+}
+
+fn project_parameters(
+    parameters: &BTreeMap<Vec<Key>, BTreeSet<summary::ParameterOrigin>>,
+    path: &[Key],
+) -> BTreeMap<Vec<Key>, BTreeSet<summary::ParameterOrigin>> {
+    let mut result: BTreeMap<Vec<Key>, BTreeSet<summary::ParameterOrigin>> = BTreeMap::new();
+    for (field, origins) in parameters {
+        if let Some(suffix) = field.strip_prefix(path) {
+            result
+                .entry(suffix.to_vec())
+                .or_default()
+                .extend(origins.iter().cloned());
+        } else if let Some(suffix) = path.strip_prefix(field.as_slice()) {
+            result
+                .entry(Vec::new())
+                .or_default()
+                .extend(origins.iter().map(|source| {
+                    let mut source = source.clone();
+                    source.path.extend_from_slice(suffix);
+                    source
+                }));
+        }
+    }
+    result
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +271,7 @@ struct LoanState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct State {
+    task_slots: BTreeMap<TaskSlot, TaskCount>,
     values: Vec<Value>,
     captures: Vec<Resolved>,
     loans: Vec<LoanState>,
@@ -143,12 +279,24 @@ pub(super) struct State {
     memory: Vec<Value>,
     writes: BTreeMap<Location, bool>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TaskSlot {
+    registry: LocalId,
+    spawn: BlockId,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TaskCount {
+    AtMostOne,
+    MayBeMany,
+}
 impl State {
     pub fn initial(context: &Context<'_>) -> Self {
         let frame = context.summaries.frames[context.body.definition.0 as usize]
             .as_ref()
             .unwrap();
         let mut state = Self {
+            task_slots: BTreeMap::new(),
             values: vec![Value::default(); context.body.locals.len()],
             captures: vec![Resolved::default(); context.body.locals.len()],
             loans: vec![LoanState::default(); context.loans.len()],
@@ -157,6 +305,14 @@ impl State {
             writes: BTreeMap::new(),
         };
         for (index, input) in frame.inputs.iter().enumerate() {
+            state.memory[index].parameters.insert(
+                Vec::new(),
+                BTreeSet::from([summary::ParameterOrigin {
+                    parameter: input.parameter,
+                    path: input.path.iter().copied().chain([Key::Deref]).collect(),
+                }]),
+            );
+            state.memory[index].opaque = true;
             let loan = context.sites.inputs[index];
             state.loans[loan.0 as usize].targets.insert(Location {
                 root: Root::External(index as u32),
@@ -176,6 +332,12 @@ impl State {
     }
     pub fn merge(&mut self, other: Self) -> bool {
         let mut changed = self.merge_writes(&other.writes);
+        for (site, many) in other.task_slots {
+            let old = self.task_slots.get(&site).copied();
+            let merged = old.unwrap_or(TaskCount::AtMostOne).max(many);
+            changed |= old != Some(merged);
+            self.task_slots.insert(site, merged);
+        }
         for (old, new) in self.memory.iter_mut().zip(other.memory) {
             let before = old.clone();
             old.merge(new);
@@ -221,8 +383,24 @@ impl State {
     }
     pub fn bounded(&self) -> bool {
         self.writes.len() <= 1024
+            && self.task_slots.len() <= ORIGIN_LIMIT
             && self.values.iter().chain(&self.memory).all(|value| {
-                value.functions.len() <= ORIGIN_LIMIT
+                value.tasks.len() <= ORIGIN_LIMIT
+                    && value.task_fields.len() <= ORIGIN_LIMIT
+                    && value.task_fields.values().all(|paths| {
+                        paths.len() <= ORIGIN_LIMIT && paths.iter().all(|path| path.len() <= 128)
+                    })
+                    && value.task_paths.len() <= ORIGIN_LIMIT
+                    && value.task_paths.values().all(|paths| {
+                        paths.len() <= ORIGIN_LIMIT && paths.iter().all(|path| path.len() <= 128)
+                    })
+                    && value.parameters.len() <= ORIGIN_LIMIT
+                    && value.parameters.iter().all(|(path, sources)| {
+                        path.len() <= 128
+                            && sources.len() <= ORIGIN_LIMIT
+                            && sources.iter().all(|source| source.path.len() <= 128)
+                    })
+                    && value.functions.len() <= ORIGIN_LIMIT
                     && value.vtables.len() <= ORIGIN_LIMIT
                     && value.fields.len() <= ORIGIN_LIMIT
                     && value.fields.keys().all(|path| path.len() <= 128)
@@ -437,14 +615,14 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
         resolved
     }
     fn dereference(&mut self, resolved: Resolved, ty: TyId, state: &State) -> Resolved {
-        if matches!(self.context.hir.types.get(ty), Ty::Pointer { .. }) {
+        let value = self.read_value(&resolved, ty, state);
+        if matches!(self.context.hir.types.get(ty), Ty::Pointer { .. }) && value.fields.is_empty() {
             self.gap(GapKind::RawPointer);
             return Resolved {
                 unknown: true,
                 ..Resolved::default()
             };
         }
-        let value = self.read_value(&resolved, ty, state);
         let mut target = Resolved {
             via: resolved.via,
             permissions: resolved.permissions,
@@ -480,14 +658,23 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
                 Root::Static => value.unknown |= self.context.properties.get(ty).references,
             }
         }
-        if !self.context.properties.get(ty).references {
+        if !self.context.properties.carries_origins(ty)
+            && !matches!(self.context.hir.types.get(ty), Ty::Pointer { .. })
+        {
             value.fields.clear();
+            value.tasks.clear();
             if !matches!(
                 self.context.hir.types.get(ty),
                 Ty::Function { .. } | Ty::ForAll { .. }
             ) {
                 value.unknown = false;
             }
+        }
+        if matches!(self.context.hir.types.get(ty), Ty::Reference { .. })
+            && value.fields.is_empty()
+            && value.parameters.is_empty()
+        {
+            value.unknown = true;
         }
         if value.unknown {
             self.gap(GapKind::UnknownOrigin);
@@ -612,6 +799,9 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
     }
     fn borrow(&mut self, mutable: bool, place: &Place, state: &mut State) -> Value {
         let target = self.resolve(place, state);
+        if target.unknown && self.has_raw_projection(place) {
+            self.finding(FindingKind::UntrackedOwner, None);
+        }
         self.check(&target, Access::Borrow(mutable), state);
         let loan = self.context.sites.borrows[self.point.block.0 as usize]
             [self.point.statement.expect("borrow statement") as usize]
@@ -714,6 +904,13 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
             .unwrap();
         let position =
             self.context.sites.parameter_positions[local.0 as usize].expect("parameter position");
+        state.values[local.0 as usize].parameters.insert(
+            Vec::new(),
+            BTreeSet::from([summary::ParameterOrigin {
+                parameter: position,
+                path: Vec::new(),
+            }]),
+        );
         for (index, input) in frame.inputs.iter().enumerate() {
             if let summary::Storage::Parameter { parameter, path } = &input.storage
                 && *parameter == position
@@ -724,7 +921,7 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
         }
         if !frame.complete {
             self.gap(GapKind::UnknownOrigin);
-            state.values[local.0 as usize].unknown = true;
+            state.values[local.0 as usize].opaque = true;
         }
     }
     fn end_storage(&mut self, local: LocalId, state: &mut State) {
@@ -735,6 +932,14 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
     }
     pub fn statement(&mut self, statement: &StatementKind, state: &mut State) {
         match statement {
+            StatementKind::RegistryStart(local) => {
+                state.values[local.0 as usize] = Value::default()
+            }
+            StatementKind::Contract(contract) => {
+                for argument in &contract.atom.arguments {
+                    self.consume(argument, state);
+                }
+            }
             StatementKind::Assign { destination, value } => self.assign(destination, value, state),
             StatementKind::Argument(local) => self.argument(*local, state),
             StatementKind::IteratorStart { iterator, value } => {
@@ -757,6 +962,11 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
         mut state: State,
     ) -> Vec<(BlockId, State)> {
         match terminator {
+            Terminator::Spawn { .. } => self.spawn(terminator, state),
+            Terminator::TaskDrain { registry, next, .. } => {
+                self.drain(*registry, &mut state);
+                vec![(*next, state)]
+            }
             Terminator::Call { .. } | Terminator::DynCall { .. } => self.call(terminator, state),
             Terminator::IteratorNext {
                 iterator,
@@ -941,6 +1151,9 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
         }
     }
     fn check_region(&mut self, value: &Value, region: crate::types::Region, state: &State) {
+        if value.unknown && value.loans().is_empty() && value.parameters.is_empty() {
+            self.finding(FindingKind::UnknownRegion, None);
+        }
         let frame = self.context.summaries.frames[self.context.body.definition.0 as usize]
             .as_ref()
             .unwrap();
@@ -959,7 +1172,35 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
             self.gap(GapKind::UnknownOrigin);
         }
     }
+
+    fn has_raw_projection(&self, place: &Place) -> bool {
+        let mut ty = self.context.body.local(place.local).ty;
+        let mut variant = None;
+        for (index, projection) in place.projection.iter().enumerate() {
+            if index == 0
+                && self.context.body.local(place.local).kind == LocalKind::Address
+                && *projection == Projection::Deref
+            {
+                continue;
+            }
+            if *projection == Projection::Deref
+                && matches!(self.context.hir.types.get(ty), Ty::Pointer { .. })
+            {
+                return true;
+            }
+            ty = self.project_type(ty, *projection, variant);
+            variant = if let Projection::Downcast(id) = projection {
+                Some(*id)
+            } else {
+                None
+            };
+        }
+        false
+    }
     fn check_escape(&mut self, value: &Value, state: &State) {
+        if !value.tasks.is_empty() {
+            self.finding(FindingKind::TaskEscape, None);
+        }
         for loan in value.loans() {
             if state.loans[loan.0 as usize]
                 .targets

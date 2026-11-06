@@ -23,6 +23,7 @@ impl Context<'_> {
             let slot = self.trait_state.impl_indices[&owner];
             self.program.implementations[slot].target = target;
             self.program.implementations[slot].trait_ref = trait_ref;
+            self.validate_package_implementation(slot);
             if trait_type.is_none()
                 && !matches!(self.program.types.get(target), Ty::Named { .. } | Ty::Error)
             {
@@ -32,6 +33,26 @@ impl Context<'_> {
                     item.span,
                 );
             }
+        }
+    }
+
+    fn validate_package_implementation(&mut self, index: usize) {
+        let item = &self.program.implementations[index];
+        let owner = self.definition(item.definition);
+        let Some(package) = self.package(owner.module) else {
+            return;
+        };
+        let local_target = matches!(self.program.types.get(item.target), Ty::Named { definition, .. }
+            if self.package(self.definition(*definition).module) == Some(package));
+        let local_trait = item.trait_ref.as_ref().is_some_and(|reference| {
+            self.package(self.definition(reference.definition).module) == Some(package)
+        });
+        if !local_target && !local_trait {
+            self.error(
+                "E-IMPL-ORPHAN",
+                "a package may implement only a local trait or a local nominal type",
+                owner.span,
+            );
         }
     }
 
@@ -174,7 +195,7 @@ impl Context<'_> {
         let parameter = *index;
         for &bound in bounds {
             if let Some(trait_ref) = self.trait_reference(bound, module, owner, parameters) {
-                self.program.definitions[owner.0 as usize]
+                self.program.definitions[owner]
                     .bounds
                     .push(model::TraitBound {
                         parameter,
@@ -210,9 +231,7 @@ impl Context<'_> {
                         ),
                     }
                 }
-                self.program.definitions[method.0 as usize]
-                    .bounds
-                    .push(bound);
+                self.program.definitions[method].bounds.push(bound);
             }
         }
     }
@@ -224,7 +243,7 @@ impl Context<'_> {
             for method in trait_.methods {
                 let arguments = self.program.types.generic_arguments(method.definition);
                 let inherited = &arguments[1..method.inherited_parameters as usize];
-                self.program.definitions[method.definition.0 as usize]
+                self.program.definitions[method.definition]
                     .bounds
                     .push(model::TraitBound {
                         parameter: 0,
@@ -249,7 +268,7 @@ impl Context<'_> {
                             ),
                         }
                     }
-                    self.program.definitions[method.definition.0 as usize]
+                    self.program.definitions[method.definition]
                         .bounds
                         .push(bound);
                 }
@@ -278,9 +297,16 @@ impl Context<'_> {
 
     fn validate_language_role(&mut self, trait_: &model::Trait, role: model::LanguageItem) {
         let span = self.definition(trait_.definition).span;
-        if role == model::LanguageItem::Copy {
+        if matches!(
+            role,
+            model::LanguageItem::Copy
+                | model::LanguageItem::Send
+                | model::LanguageItem::Sync
+                | model::LanguageItem::TaskTransfer
+                | model::LanguageItem::SuspendSafe
+        ) {
             if !trait_.methods.is_empty()
-                || !trait_.supertraits.is_empty()
+                || role == model::LanguageItem::Copy && !trait_.supertraits.is_empty()
                 || !self
                     .definition(trait_.definition)
                     .generic_parameter_kinds
@@ -288,7 +314,7 @@ impl Context<'_> {
             {
                 self.error(
                     "E-LANG-ITEM",
-                    "Copy is a marker trait without methods or generic parameters",
+                    "an auto marker trait cannot declare methods or generic parameters",
                     span,
                 );
             }
@@ -334,7 +360,11 @@ impl Context<'_> {
             )
             .map(|index| TyId(index as u32));
         match role {
-            model::LanguageItem::Copy => unreachable!("marker handled above"),
+            model::LanguageItem::Copy
+            | model::LanguageItem::Send
+            | model::LanguageItem::Sync
+            | model::LanguageItem::TaskTransfer
+            | model::LanguageItem::SuspendSafe => unreachable!("marker handled above"),
             model::LanguageItem::Drop => {
                 self.valid_drop_signature(method, parameters, *result, self_ty)
             }
@@ -343,6 +373,10 @@ impl Context<'_> {
             }
             model::LanguageItem::Fn | model::LanguageItem::FnMut | model::LanguageItem::FnOnce => {
                 self.valid_fn_signature(role, parameters, self_ty)
+                    && self
+                        .definition(method.definition)
+                        .declaration_clauses
+                        .is_empty()
                     && self.definition(method.definition).generic_parameter_kinds
                         [method.inherited_parameters as usize..]
                         .iter()
@@ -418,6 +452,28 @@ impl Context<'_> {
             return;
         };
         let trait_ = self.program.traits[trait_index].clone();
+        self.validate_transfer_implementation(&implementation, trait_.language_item);
+        if self
+            .program
+            .tasks
+            .trusted
+            .contains_key(&implementation.definition)
+            && !matches!(
+                trait_.language_item,
+                Some(
+                    model::LanguageItem::Send
+                        | model::LanguageItem::Sync
+                        | model::LanguageItem::TaskTransfer
+                        | model::LanguageItem::SuspendSafe
+                )
+            )
+        {
+            self.error(
+                "E-IMPL-TRUST",
+                "trusted impl is restricted to compiler transfer auto traits",
+                self.definition(implementation.definition).span,
+            );
+        }
         for method in &trait_.methods {
             self.validate_impl_method(index, &implementation, method);
         }
@@ -446,6 +502,40 @@ impl Context<'_> {
                 "Copy cannot be implemented for a type with non-Copy fields or a destructor",
                 self.definition(implementation.definition).span,
             );
+        }
+    }
+
+    fn validate_transfer_implementation(
+        &mut self,
+        implementation: &model::Impl,
+        role: Option<model::LanguageItem>,
+    ) {
+        use crate::tasks::transfer::{self, Property};
+        let Some(property) = role.and_then(Property::from_role) else {
+            return;
+        };
+        let span = self.definition(implementation.definition).span;
+        if self
+            .program
+            .tasks
+            .trusted
+            .contains_key(&implementation.definition)
+        {
+            if !self.definition(implementation.definition).bounds.is_empty()
+                || !matches!(
+                    self.program.types.get(implementation.target),
+                    Ty::Named { .. }
+                )
+            {
+                self.error("E-IMPL-TRUST", "a trusted transfer witness must name an owning nominal type and make an unconditional guarantee", span);
+            }
+            return;
+        }
+        let properties = crate::local::properties::Properties::compute(&mut self.program);
+        if let Err(reason) =
+            transfer::check(&self.program, &properties, implementation.target, property)
+        {
+            self.error("E-IMPL-TRANSFER", format!("auto-trait impl is not structurally established: {reason}; an external guarantee requires contract impl because"), span);
         }
     }
 
@@ -535,7 +625,7 @@ impl Context<'_> {
         let method = method.implementation;
         self.program.implementations[index].methods[slot].declaration =
             Some(declaration.definition);
-        self.program.definitions[method.0 as usize].visibility =
+        self.program.definitions[method].visibility =
             self.definition(declaration.definition).visibility;
         Some(method)
     }
@@ -579,26 +669,16 @@ impl Context<'_> {
                 self.definition(implementation).span,
             );
         }
-        if self.definition(declaration).declaration_clauses
-            != self.definition(implementation).declaration_clauses
-            && !self.definition(declaration).declaration_clauses.is_empty()
-        {
-            self.error(
-                "E-IMPL-CONTRACT",
-                "trait method contract refinement is not established",
-                self.definition(implementation).span,
-            );
-        }
         let required = self.definition(declaration).attributes.clone();
         for attribute in required {
-            if !self.program.definitions[implementation.0 as usize]
+            if !self.program.definitions[implementation]
                 .attributes
                 .iter()
                 .any(|present| {
                     present.name == attribute.name && present.arguments == attribute.arguments
                 })
             {
-                self.program.definitions[implementation.0 as usize]
+                self.program.definitions[implementation]
                     .attributes
                     .push(attribute);
             }

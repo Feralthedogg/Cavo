@@ -51,7 +51,7 @@ pub fn cleanup_candidates(program: &mut hir::Program) -> Result<CleanupCandidate
             &properties,
             Mode::Function,
         );
-        let (summary, calls) = summarize_source(function, scan, &indices, &properties);
+        let (summary, calls) = summarize_source(function, scan, &indices, &properties, program);
         summaries.push(summary);
         dependencies.push(calls);
     }
@@ -59,6 +59,11 @@ pub fn cleanup_candidates(program: &mut hir::Program) -> Result<CleanupCandidate
     let mut allowed = vec![false; program.definitions.len()];
     for summary in summaries {
         allowed[summary.definition.0 as usize] = summary.cleanup_safe();
+    }
+    for (&definition, contract) in &program.modular.functions {
+        if crate::modular::usable(program, definition) {
+            allowed[definition.0 as usize] = contract.cleanup_safe();
+        }
     }
     Ok(CleanupCandidates {
         allowed,
@@ -71,6 +76,7 @@ fn summarize_source(
     scan: Scan,
     indices: &[Option<usize>],
     properties: &Properties,
+    program: &hir::Program,
 ) -> (FunctionEffects, Vec<usize>) {
     let mut summary = FunctionEffects::empty(function.definition);
     if scan.problem.is_some() || !function.clauses.is_empty() {
@@ -90,6 +96,15 @@ fn summarize_source(
     }
     let mut calls = Vec::with_capacity(scan.calls.len());
     for definition in scan.calls {
+        if crate::modular::usable(program, definition)
+            && let Some(contract) = program.modular.functions.get(&definition)
+        {
+            summary.effects.extend(&contract.upper);
+            if !contract.bounded {
+                summary.bounded = summary.bounded.max(Boundedness::Unknown);
+            }
+            continue;
+        }
         if let Some(index) = indices[definition.0 as usize] {
             calls.push(index);
         } else {
@@ -278,13 +293,13 @@ impl<'a> Walker<'a> {
     }
 
     fn statement(&mut self, id: hir::StmtId) -> Result<(), CleanupError> {
-        let statement = &self.function.statements[id.0 as usize];
+        let statement = &self.function.statements[id];
         if std::mem::replace(&mut self.seen_statements[id.0 as usize], true) {
             return Ok(());
         }
         match &statement.kind {
             S::Declare { local, initializer } => {
-                self.check_drop_type(self.function.locals[local.0 as usize].ty, statement.span)?;
+                self.check_drop_type(self.function.locals[local].ty, statement.span)?;
                 if let Some(value) = initializer {
                     self.expression_work(*value);
                 }
@@ -334,9 +349,15 @@ impl<'a> Walker<'a> {
         if std::mem::replace(&mut self.seen_expressions[id.0 as usize], true) {
             return Ok(());
         }
-        let expression = &self.function.expressions[id.0 as usize];
+        let expression = &self.function.expressions[id];
         self.check_drop_type(expression.ty, expression.span)?;
         match &expression.kind {
+            H::Spawn { .. } => {
+                return Err(problem(
+                    expression.span,
+                    "task admission cannot execute in bounded cleanup",
+                ));
+            }
             H::Call {
                 callee, arguments, ..
             } => {
@@ -407,17 +428,17 @@ impl<'a> Walker<'a> {
     }
 
     fn call(&mut self, mut callee: hir::ExprId, span: Span) -> Result<(), CleanupError> {
-        while let H::Group(inner) = self.function.expressions[callee.0 as usize].kind {
+        while let H::Group(inner) = self.function.expressions[callee].kind {
             callee = inner;
         }
-        let H::Definition(definition) = self.function.expressions[callee.0 as usize].kind else {
+        let H::Definition(definition) = self.function.expressions[callee].kind else {
             return Err(problem(
                 span,
                 "defer cannot call a function with unknown indirect effects",
             ));
         };
         if matches!(
-            self.program.definitions[definition.0 as usize].kind,
+            self.program.definitions[definition].kind,
             hir::DefinitionKind::Variant { .. }
         ) {
             return Ok(());

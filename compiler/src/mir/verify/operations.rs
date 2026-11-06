@@ -98,7 +98,10 @@ impl Verifier<'_> {
 
     pub(super) fn value_place(&self, place: &Place) -> Result<TyId, InvariantError> {
         require(
-            self.local(place.local)?.kind != LocalKind::ArrayIterator,
+            !matches!(
+                self.local(place.local)?.kind,
+                LocalKind::ArrayIterator | LocalKind::TaskRegistry
+            ),
             "owned iterator storage is not an ordinary value",
         )?;
         self.place(place)

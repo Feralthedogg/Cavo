@@ -46,7 +46,7 @@ impl Builder<'_> {
         next: BlockId,
         reason: ExitKind,
     ) -> Result<BlockId, LowerError> {
-        let S::Defer { body, .. } = &self.source.statements[id.0 as usize].kind else {
+        let S::Defer { body, .. } = &self.source.statements[id].kind else {
             return self.fail(
                 self.source.body.span,
                 "cleanup registration is not a defer body",

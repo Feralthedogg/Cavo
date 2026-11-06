@@ -6,7 +6,9 @@ mod literal;
 mod moves;
 pub(crate) use moves::{requires_execution_mir, validate as validate_moves};
 mod attributes;
+mod contracts;
 mod discriminants;
+mod tasks;
 mod traits;
 pub(crate) use discriminants::enum_discriminants;
 pub(crate) use traits::validate_destructors;
@@ -27,43 +29,20 @@ pub fn check(
     symbols: &Interner,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> hir::Program {
-    let mut context = Context {
-        ast,
-        sources,
-        symbols,
-        diagnostics,
-        program: hir::Program {
-            constants: crate::ctfe::Program::default(),
-            stage: hir::ValidationStage::Types,
-            modules: Vec::new(),
-            definitions: Vec::new(),
-            types: TypeContext::new(),
-            records: Vec::new(),
-            enums: Vec::new(),
-            functions: Vec::new(),
-            closures: Vec::new(),
-            traits: Vec::new(),
-            implementations: Vec::new(),
-            vtables: Vec::new(),
-        },
-        module_paths: HashMap::new(),
-        names: Vec::new(),
-        imports: Vec::new(),
-        item_definitions: vec![None; ast.items.len()],
-        item_modules: vec![None; ast.items.len()],
-        generics: HashMap::new(),
-        const_parameter_types: HashMap::new(),
-        constant_assertions: HashSet::new(),
-        variants: HashMap::new(),
-        record_indices: Vec::new(),
-        aliases: Vec::new(),
-        alias_depth: 0,
-        type_depth: 0,
-        region_binders: Vec::new(),
-        result_item: None,
-        constant_queries: constants::Queries::default(),
-        trait_state: traits::State::default(),
-    };
+    check_with_modules(ast, sources, symbols, diagnostics, &Default::default())
+}
+
+pub(crate) fn check_with_modules(
+    ast: &Ast,
+    sources: &SourceMap,
+    symbols: &Interner,
+    diagnostics: &mut Vec<Diagnostic>,
+    verified_modules: &std::collections::BTreeMap<
+        crate::source::FileId,
+        crate::modular::capsule::VerifiedImport,
+    >,
+) -> hir::Program {
+    let mut context = Context::new(ast, sources, symbols, diagnostics, verified_modules);
     context.collect();
     context.collect_trait_members();
     context
@@ -71,19 +50,32 @@ pub fn check(
         .resize(context.program.definitions.len(), None);
     context.prepare_implementations();
     context.signatures();
+    context.register_task_roles();
     context.result_item = body::result_item(&mut context);
+    context.program.tasks.result = context.result_item;
+    context.register_contract_roles();
+    context.validate_task_intrinsics();
     context.check_constant_declarations();
     context.check_attribute_constants();
     context.check_enum_discriminants();
     context.check_assert_declarations();
     context.validate_implementations();
+    context.register_modular_contracts();
+    context.bind_verified_modules();
     context.record_cycles();
     context.check_bodies();
+    context.validate_trait_contracts();
+    tasks::validate_callable_identities(&mut context);
+    tasks::validate_escapes(&mut context);
     context.check_instantiated_assertions();
     context.program
 }
 
 struct Context<'a> {
+    verified_modules: &'a std::collections::BTreeMap<
+        crate::source::FileId,
+        crate::modular::capsule::VerifiedImport,
+    >,
     ast: &'a Ast,
     sources: &'a SourceMap,
     symbols: &'a Interner,
@@ -108,6 +100,61 @@ struct Context<'a> {
     trait_state: traits::State,
 }
 
+impl<'a> Context<'a> {
+    fn new(
+        ast: &'a Ast,
+        sources: &'a SourceMap,
+        symbols: &'a Interner,
+        diagnostics: &'a mut Vec<Diagnostic>,
+        verified_modules: &'a std::collections::BTreeMap<
+            crate::source::FileId,
+            crate::modular::capsule::VerifiedImport,
+        >,
+    ) -> Self {
+        Self {
+            verified_modules,
+            ast,
+            sources,
+            symbols,
+            diagnostics,
+            program: hir::Program {
+                modular: crate::modular::Declarations::default(),
+                tasks: crate::tasks::Declarations::default(),
+                contracts: crate::contracts::Declarations::default(),
+                constants: crate::ctfe::Program::default(),
+                stage: hir::ValidationStage::Types,
+                modules: Vec::new(),
+                definitions: Vec::new(),
+                types: TypeContext::new(),
+                records: Vec::new(),
+                enums: Vec::new(),
+                functions: Vec::new(),
+                closures: Vec::new(),
+                traits: Vec::new(),
+                implementations: Vec::new(),
+                vtables: Vec::new(),
+            },
+            module_paths: HashMap::new(),
+            names: Vec::new(),
+            imports: Vec::new(),
+            item_definitions: vec![None; ast.items.len()],
+            item_modules: vec![None; ast.items.len()],
+            generics: HashMap::new(),
+            const_parameter_types: HashMap::new(),
+            constant_assertions: HashSet::new(),
+            variants: HashMap::new(),
+            record_indices: Vec::new(),
+            aliases: Vec::new(),
+            alias_depth: 0,
+            type_depth: 0,
+            region_binders: Vec::new(),
+            result_item: None,
+            constant_queries: constants::Queries::default(),
+            trait_state: traits::State::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum AliasState {
     NotAlias,
@@ -125,11 +172,37 @@ impl Context<'_> {
             else {
                 continue;
             };
-            if let ItemKind::Function(function) = &item.kind
-                && let Some(body) = &function.body
-            {
-                let checked = body::check_function(self, module, definition, function, body);
-                self.program.functions.push(checked);
+            match &item.kind {
+                ItemKind::Function(function) => {
+                    if let Some(body) = &function.body {
+                        let checked =
+                            body::check_function(self, module, definition, function, body);
+                        self.program.functions.push(checked);
+                    } else {
+                        body::check_signature(self, module, definition, function, item.span);
+                    }
+                }
+                ItemKind::Contract {
+                    parameters,
+                    requirements,
+                    ..
+                } => {
+                    let checked = body::check_predicate(
+                        self,
+                        module,
+                        definition,
+                        parameters,
+                        requirements,
+                        item.span,
+                    );
+                    self.program
+                        .contracts
+                        .predicates
+                        .get_mut(&definition)
+                        .expect("registered predicate")
+                        .body = Some(checked);
+                }
+                _ => {}
             }
         }
     }
@@ -147,7 +220,7 @@ impl Context<'_> {
         );
     }
     fn definition(&self, id: DefId) -> &hir::Definition {
-        &self.program.definitions[id.0 as usize]
+        &self.program.definitions[id]
     }
     fn collect(&mut self) {
         let ast = self.ast;
@@ -257,15 +330,15 @@ impl Context<'_> {
         };
         let definition = self.add_definition(name, module, kind, item.visibility, foreign_abi);
         if let ItemKind::Function(function) = &item.kind {
-            self.program.definitions[definition.0 as usize].const_origin =
+            self.program.definitions[definition].const_origin =
                 function.constant.then_some(definition);
-            self.program.definitions[definition.0 as usize].declaration_clauses = function
+            self.program.definitions[definition].declaration_clauses = function
                 .clauses
                 .iter()
                 .map(|c| (c.kind, self.ast.expr(c.predicate).span))
                 .collect();
         }
-        self.program.definitions[definition.0 as usize].attributes = item
+        self.program.definitions[definition].attributes = item
             .attributes
             .iter()
             .map(|attribute| hir::Attribute {
@@ -276,9 +349,7 @@ impl Context<'_> {
             })
             .collect();
         self.names[module.0 as usize].insert(name.symbol, definition);
-        self.program.modules[module.0 as usize]
-            .definitions
-            .push(definition);
+        self.program.modules[module].definitions.push(definition);
         self.item_definitions[item_id.0 as usize] = Some(definition);
         if let ItemKind::TypeAlias { target, .. } = item.kind {
             self.aliases[definition.0 as usize] = AliasState::Unresolved(target);
@@ -415,7 +486,7 @@ impl Context<'_> {
                         parameters: args,
                         result,
                     });
-                    self.program.definitions[definition.0 as usize].ty = ty;
+                    self.program.definitions[definition].ty = ty;
                     if function.variadic {
                         self.unsupported("variadic call promotion", item.span);
                     }
@@ -426,7 +497,7 @@ impl Context<'_> {
                         definition,
                         arguments: args,
                     });
-                    self.program.definitions[definition.0 as usize].ty = ty;
+                    self.program.definitions[definition].ty = ty;
                     let mut names = HashSet::new();
                     let fields = fields
                         .iter()
@@ -462,9 +533,7 @@ impl Context<'_> {
                         parameters: self.generics.get(&definition).cloned().unwrap_or_default(),
                         fields,
                     });
-                    if *union {
-                        self.unsupported("raw union permission checking", item.span);
-                    }
+                    let _ = union; // Field accesses are checked in the contract domain.
                 }
                 ItemKind::Enum { variants, .. } => {
                     let args = self.parameter_arguments(definition);
@@ -472,7 +541,7 @@ impl Context<'_> {
                         definition,
                         arguments: args,
                     });
-                    self.program.definitions[definition.0 as usize].ty = result;
+                    self.program.definitions[definition].ty = result;
                     for variant in variants {
                         let Some(&child) = self.variants.get(&(definition, variant.name.symbol))
                         else {
@@ -494,14 +563,12 @@ impl Context<'_> {
                                 result,
                             })
                         };
-                        self.program.definitions[child.0 as usize].ty = ty;
+                        self.program.definitions[child].ty = ty;
                     }
                 }
-                ItemKind::Trait { .. } => {
-                    self.program.definitions[definition.0 as usize].ty = TyId::VOID
-                }
-                ItemKind::Contract { .. } => {
-                    self.unsupported("named contract predicate checking", item.span)
+                ItemKind::Trait { .. } => self.program.definitions[definition].ty = TyId::VOID,
+                ItemKind::Contract { parameters, .. } => {
+                    self.contract_signature(definition, parameters)
                 }
                 ItemKind::Global(_) => {
                     if let Err(error) = self.declared_constant_type(definition) {
@@ -561,7 +628,7 @@ impl Context<'_> {
             ty = TyId::ERROR;
         }
         self.aliases[definition.0 as usize] = AliasState::Resolved(ty);
-        self.program.definitions[definition.0 as usize].ty = ty;
+        self.program.definitions[definition].ty = ty;
         ty
     }
     fn resolve_type(
@@ -802,7 +869,7 @@ impl Context<'_> {
             return None;
         };
         let found = self.definition(definition);
-        if found.module != module && found.visibility == Visibility::Private {
+        if !self.visible(found.visibility, found.module, module) {
             report(
                 self.diagnostics,
                 Diagnostic::error(
@@ -815,6 +882,33 @@ impl Context<'_> {
             return None;
         }
         Some(definition)
+    }
+
+    fn visible(&self, visibility: Visibility, owner: ModuleId, requester: ModuleId) -> bool {
+        if visibility == Visibility::Private {
+            return owner == requester;
+        }
+        if visibility == Visibility::Public {
+            return true;
+        }
+        self.package(owner) == self.package(requester)
+    }
+    fn field_visible(
+        &self,
+        definition: DefId,
+        visibility: Visibility,
+        requester: ModuleId,
+    ) -> bool {
+        !self.program.tasks.captures.contains(&definition)
+            && self.visible(visibility, self.definition(definition).module, requester)
+    }
+
+    fn package(&self, module: ModuleId) -> Option<Symbol> {
+        self.program.modules[module]
+            .path
+            .first()
+            .copied()
+            .filter(|name| self.symbols.get(*name).starts_with("__cavo_pkg_"))
     }
     fn lookup(&self, module: ModuleId, path: &[Name]) -> Option<DefId> {
         if path.len() == 1 {

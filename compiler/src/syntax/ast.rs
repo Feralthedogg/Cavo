@@ -29,16 +29,16 @@ pub struct Ast {
 
 impl Ast {
     pub fn expr(&self, id: ExprId) -> &Expr {
-        &self.expressions[id.0 as usize]
+        &self.expressions[id]
     }
     pub fn stmt(&self, id: StmtId) -> &Stmt {
-        &self.statements[id.0 as usize]
+        &self.statements[id]
     }
     pub fn ty(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
     }
     pub fn item(&self, id: ItemId) -> &Item {
-        &self.items[id.0 as usize]
+        &self.items[id]
     }
     pub(crate) fn add_expr(&mut self, kind: ExprKind, span: Span) -> ExprId {
         let id = ExprId(

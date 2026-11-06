@@ -15,12 +15,10 @@ pub(super) fn check(context: &mut Context<'_>) {
         let payloads = enumeration
             .variants
             .iter()
-            .flat_map(
-                |id| match program.types.get(program.definitions[id.0 as usize].ty) {
-                    Ty::Function { parameters, .. } => parameters.clone(),
-                    _ => Vec::new(),
-                },
-            )
+            .flat_map(|id| match program.types.get(program.definitions[id].ty) {
+                Ty::Function { parameters, .. } => parameters.clone(),
+                _ => Vec::new(),
+            })
             .collect();
         fields[enumeration.definition.0 as usize] = Some(payloads);
     }

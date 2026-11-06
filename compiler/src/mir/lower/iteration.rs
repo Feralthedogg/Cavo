@@ -15,8 +15,8 @@ impl Builder<'_> {
         body: &hir::Block,
         span: Span,
     ) -> Result<(), LowerError> {
-        let element = self.source.locals[local.0 as usize].ty;
-        let iterable_ty = self.source.expressions[iterable.0 as usize].ty;
+        let element = self.source.locals[local].ty;
+        let iterable_ty = self.source.expressions[iterable].ty;
         if !self.properties.get(element).copy || !self.properties.get(iterable_ty).copy {
             return self.owned_for_in(local, iterable, body, span);
         }
@@ -55,7 +55,7 @@ impl Builder<'_> {
         iterable: hir::ExprId,
         span: Span,
     ) -> Result<Iteration, LowerError> {
-        let ty = self.source.expressions[iterable.0 as usize].ty;
+        let ty = self.source.expressions[iterable].ty;
         if !self.properties.get(ty).copy {
             return self.fail(
                 span,

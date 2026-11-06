@@ -5,6 +5,7 @@ use crate::{
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Property {
+    pub raw_pointers: bool,
     pub copy: bool,
     pub references: bool,
     pub may_drop: bool,
@@ -19,6 +20,7 @@ pub(crate) struct Properties {
     enum_variants: Vec<Option<Vec<hir::DefId>>>,
     remaining: usize,
     user_drop: Vec<bool>,
+    unions: std::collections::HashSet<TyId>,
 }
 
 impl Properties {
@@ -37,6 +39,7 @@ impl Properties {
             enum_variants,
             remaining: 200_000,
             user_drop: Vec::new(),
+            unions: Default::default(),
         };
         let mut active = Vec::new();
         let original_types = program.types.values().len();
@@ -52,21 +55,30 @@ impl Properties {
             .copied()
             .flatten()
             .unwrap_or(Property {
+                raw_pointers: false,
                 copy: false,
                 references: true,
                 may_drop: true,
             })
     }
 
+    pub fn carries_origins(&self, ty: TyId) -> bool {
+        let property = self.get(ty);
+        property.references || property.raw_pointers
+    }
+
     pub fn user_drop(&self, ty: TyId) -> bool {
         self.user_drop.get(ty.0 as usize).copied().unwrap_or(false)
+    }
+    pub fn union(&self, ty: TyId) -> bool {
+        self.unions.contains(&ty)
     }
 
     pub fn record_field(&self, ty: TyId, index: u32, program: &hir::Program) -> bool {
         let Ty::Named { definition, .. } = program.types.get(ty) else {
             return false;
         };
-        program.definitions[definition.0 as usize].kind == hir::DefinitionKind::Record
+        program.definitions[definition].kind == hir::DefinitionKind::Record
             && self.fields[definition.0 as usize]
                 .as_ref()
                 .is_some_and(|fields| (index as usize) < fields.len())
@@ -95,6 +107,7 @@ impl Properties {
     ) -> Property {
         if self.remaining == 0 || active.len() >= 64 || active.contains(&ty) {
             return Property {
+                raw_pointers: false,
                 copy: false,
                 references: true,
                 may_drop: true,
@@ -111,14 +124,21 @@ impl Properties {
             | Ty::Char
             | Ty::Integer { .. }
             | Ty::Float { .. }
-            | Ty::Pointer { .. }
             | Ty::Function { .. }
             | Ty::ForAll { .. } => Property {
+                raw_pointers: false,
+                copy: true,
+                references: false,
+                may_drop: false,
+            },
+            Ty::Pointer { .. } => Property {
+                raw_pointers: true,
                 copy: true,
                 references: false,
                 may_drop: false,
             },
             Ty::Reference { mutable, .. } => Property {
+                raw_pointers: false,
                 copy: !mutable,
                 references: true,
                 may_drop: false,
@@ -133,12 +153,14 @@ impl Properties {
                 let Some(fields) = self.fields[definition.0 as usize].clone() else {
                     active.pop();
                     return Property {
+                        raw_pointers: false,
                         copy: false,
                         references: true,
                         may_drop: true,
                     };
                 };
                 let mut result = Property {
+                    raw_pointers: false,
                     copy: true,
                     references: false,
                     may_drop: false,
@@ -160,25 +182,37 @@ impl Properties {
                     let property = self.resolve(field, program, active);
                     result.copy &= property.copy;
                     result.references |= property.references;
+                    result.raw_pointers |= property.raw_pointers;
                     result.may_drop |= property.may_drop;
                 }
-                if program.definitions[definition.0 as usize].kind == hir::DefinitionKind::Record {
+                if matches!(
+                    program.definitions[definition].kind,
+                    hir::DefinitionKind::Record | hir::DefinitionKind::Union
+                ) {
                     self.record_fields
                         .resize(program.types.values().len(), None);
                     self.record_fields[ty.0 as usize] = Some(resolved_fields);
-                } else if program.definitions[definition.0 as usize].kind
-                    == hir::DefinitionKind::Enum
-                {
+                } else if program.definitions[definition].kind == hir::DefinitionKind::Enum {
                     self.enum_fields.resize(program.types.values().len(), None);
                     self.enum_fields[ty.0 as usize] = Some((definition, resolved_fields));
+                }
+                if program.definitions[definition].kind == hir::DefinitionKind::Union {
+                    self.unions.insert(ty);
                 }
                 if user_drop {
                     result.copy = false;
                     result.may_drop = true;
                 }
+                if crate::tasks::task_arguments(program, ty).is_some() {
+                    self.record_fields[ty.0 as usize] = None;
+                    result.copy = false;
+                    result.references = true;
+                    result.may_drop = true;
+                }
                 result
             }
             Ty::Parameter { owner, index } => Property {
+                raw_pointers: false,
                 copy: hir::traits::parameter_has_role(
                     program,
                     owner,
@@ -194,6 +228,7 @@ impl Properties {
                 ),
             },
             Ty::Error | Ty::Str | Ty::Dynamic { .. } => Property {
+                raw_pointers: false,
                 copy: false,
                 references: true,
                 may_drop: true,
@@ -220,9 +255,8 @@ fn declared_fields(program: &hir::Program) -> (DeclaredFields, VariantRanges) {
         let mut payloads = Vec::new();
         for &variant in &enumeration.variants {
             let start = payloads.len();
-            if let Ty::Function { parameters, .. } = program
-                .types
-                .get(program.definitions[variant.0 as usize].ty)
+            if let Ty::Function { parameters, .. } =
+                program.types.get(program.definitions[variant].ty)
             {
                 payloads.extend(parameters);
             }

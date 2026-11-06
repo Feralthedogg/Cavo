@@ -3,6 +3,7 @@
 
 mod function;
 mod glue;
+mod intrinsics;
 mod types;
 
 use crate::{
@@ -101,7 +102,7 @@ pub fn default_roots(program: &hir::Program) -> Vec<InstanceKey> {
         .functions
         .iter()
         .filter_map(|function| {
-            let definition = &program.definitions[function.definition.0 as usize];
+            let definition = &program.definitions[function.definition];
             if definition
                 .generic_parameter_kinds
                 .iter()
@@ -183,8 +184,14 @@ fn finish(
         &layout_roots,
     )
     .map_err(|error| problem(error.span.unwrap_or(span), "E-LAYOUT", error.message))?;
-    let analysis = mir::analyze(&mir, &mut hir, context.symbols, context.external)
-        .map_err(|error| problem(span, error.code, error.message))?;
+    let analysis = mir::analyze(
+        &mir,
+        &mut hir,
+        context.symbols,
+        context.external,
+        context.sources,
+    )
+    .map_err(|error| problem(span, error.code, error.message))?;
     let mut diagnostics = Vec::new();
     analysis.diagnostics(&mut diagnostics);
     if let Some(error) = diagnostics.into_iter().next() {
@@ -229,6 +236,7 @@ struct Builder<'a> {
     enum_indices: Vec<Option<usize>>,
     instances: Vec<Instance>,
     indices: HashMap<InstanceKey, InstanceId>,
+    intrinsic_instances: HashMap<InstanceKey, hir::DefId>,
     counts: Vec<usize>,
     mappings: Vec<types::Mapping>,
     drop_types: HashSet<TyId>,
@@ -262,6 +270,7 @@ impl<'a> Builder<'a> {
             enum_indices,
             instances: Vec::new(),
             indices: HashMap::new(),
+            intrinsic_instances: HashMap::new(),
             counts: vec![0; source.definitions.len()],
             mappings: Vec::new(),
             drop_types: HashSet::new(),
@@ -302,7 +311,7 @@ impl<'a> Builder<'a> {
         Ok(id)
     }
     fn normalize_key(&mut self, key: &mut InstanceKey) -> Result<(), Error> {
-        let source = &self.source.definitions[key.definition.0 as usize];
+        let source = &self.source.definitions[key.definition];
         if source.generic_parameter_kinds.len() != key.arguments.len() {
             return Err(problem(
                 source.span,
@@ -340,7 +349,7 @@ impl<'a> Builder<'a> {
         .map_err(|error| problem(error.span, error.code, error.message))
     }
     fn normalize_arguments(&mut self, key: &mut InstanceKey) -> Result<(), Error> {
-        let source = &self.source.definitions[key.definition.0 as usize];
+        let source = &self.source.definitions[key.definition];
         let mut mapping = types::Mapping::default();
         let substitution = types::Substitution {
             owner: key.definition,
@@ -372,7 +381,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
     fn check_budget(&mut self, key: &InstanceKey) -> Result<(), Error> {
-        let definition = &self.source.definitions[key.definition.0 as usize];
+        let definition = &self.source.definitions[key.definition];
         if self.instances.len() >= self.options.limits.instances
             || self.counts[key.definition.0 as usize]
                 >= self.options.limits.instances_per_definition
@@ -404,7 +413,7 @@ impl<'a> Builder<'a> {
         &mut self,
         key: &InstanceKey,
     ) -> Result<(hir::DefId, types::Mapping), Error> {
-        let mut declaration = self.source.definitions[key.definition.0 as usize].clone();
+        let mut declaration = self.source.definitions[key.definition].clone();
         let specialized = declaration
             .generic_parameter_kinds
             .iter()
@@ -437,7 +446,7 @@ impl<'a> Builder<'a> {
             .retain(|kind| *kind == GenericParamKind::Lifetime);
         declaration.type_parameter_count = 0;
         declaration.bounds.clear();
-        self.program.definitions[id.0 as usize] = declaration;
+        self.program.definitions[id] = declaration;
         let parameters: Vec<_> = self
             .source
             .types
@@ -450,8 +459,8 @@ impl<'a> Builder<'a> {
             .types
             .register_generic_parameters(id, &parameters);
         if specialized {
-            let module = self.program.definitions[id.0 as usize].module;
-            self.program.modules[module.0 as usize].definitions.push(id);
+            let module = self.program.definitions[id].module;
+            self.program.modules[module].definitions.push(id);
         }
         Ok((id, mapping))
     }

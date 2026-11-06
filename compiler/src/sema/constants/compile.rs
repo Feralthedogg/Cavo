@@ -231,7 +231,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         id
     }
     fn ty(&self, expression: ExprId) -> TyId {
-        self.expressions[expression.0 as usize].ty
+        self.expressions[expression].ty
     }
     fn expect(&self, actual: TyId, expected: TyId, span: Span) -> Result<(), Error> {
         if actual == TyId::ERROR

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn dependencies(
+pub(crate) fn dependencies(
     body: &Body,
     hir: &hir::Program,
     properties: &Properties,

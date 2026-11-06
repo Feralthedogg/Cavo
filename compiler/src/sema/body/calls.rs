@@ -62,6 +62,14 @@ impl Body<'_, '_> {
         arguments: &[ast::ExprId],
         span: Span,
     ) -> ExprId {
+        if !self.old_allowed {
+            self.context.error(
+                "E-CONTRACT-OLD",
+                "old observes scalar entry values only in an ensures clause",
+                span,
+            );
+            return self.add_expr(H::Error, TyId::ERROR, span);
+        }
         if arguments.len() != 1 || !explicit.is_empty() {
             self.context
                 .error("E-CALL-ARITY", "old requires exactly one argument", span);
@@ -82,6 +90,25 @@ impl Body<'_, '_> {
         let Some(mut call) = self.invocation(target.callee, span) else {
             return self.add_expr(H::Error, TyId::ERROR, span);
         };
+        if let Some(owner) = call.owner
+            && let Some(role) = self.context.program.contracts.intrinsics.get(&owner)
+            && !matches!(
+                role,
+                crate::contracts::Intrinsic::AsPtr
+                    | crate::contracts::Intrinsic::AsMutPtr
+                    | crate::contracts::Intrinsic::Length
+                    | crate::contracts::Intrinsic::TaskJoin
+                    | crate::contracts::Intrinsic::TaskCancel
+                    | crate::contracts::Intrinsic::TaskIgnore
+            )
+            && self.contract_depth == 0
+        {
+            self.context.error(
+                "E-CONTRACT-BOUNDARY",
+                "raw memory operations require an explicit contract boundary",
+                span,
+            );
+        }
         self.seed_call(&mut call, &target.generic_arguments, explicit, expected);
         let count = target.leading_arguments.len() + arguments.len();
         if call.parameters.len() != count {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::arena::Access as _;
 
 pub(super) fn const_origin(
     program: &Program,
@@ -28,7 +29,7 @@ pub(super) fn clause_binding(
         require(
             clause.kind == crate::syntax::ast::ClauseKind::Ensures
                 && !function.parameters.contains(&result)
-                && function.locals.get(result.0 as usize).is_some_and(|local| {
+                && function.locals.get_id(result).is_some_and(|local| {
                     !local.mutable && program.types.compatible(local.ty, function.result)
                 }),
             "contract result binding is invalid",
@@ -191,10 +192,7 @@ fn local(function: &Function, id: LocalId) -> Result<(), InvariantError> {
 fn variant_definition(program: &Program, id: DefId) -> Result<(), InvariantError> {
     definition(program, id)?;
     require(
-        matches!(
-            program.definitions[id.0 as usize].kind,
-            DefinitionKind::Variant { .. }
-        ),
+        matches!(program.definitions[id].kind, DefinitionKind::Variant { .. }),
         "expected an enum variant definition",
     )
 }

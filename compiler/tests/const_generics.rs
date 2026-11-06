@@ -59,7 +59,7 @@ fn nominal_const_arguments_have_normalized_value_identity() {
     let values: Vec<_> = function
         .parameters
         .iter()
-        .map(|id| function.locals[id.0 as usize].ty)
+        .map(|id| function.locals[id].ty)
         .collect();
     assert!(values.iter().all(|ty| *ty == values[0]));
     let Ty::Named { arguments, .. } = program.types.get(values[0]) else {

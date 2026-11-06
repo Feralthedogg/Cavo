@@ -21,9 +21,8 @@ impl Context<'_> {
             for (slot, expression, span) in attributes {
                 match self.alignment_constant(module, owner, expression, span) {
                     Ok(value) => {
-                        if let Some(attribute) = self.program.definitions[owner.0 as usize]
-                            .attributes
-                            .get_mut(slot)
+                        if let Some(attribute) =
+                            self.program.definitions[owner].attributes.get_mut(slot)
                         {
                             attribute.constant = Some(value);
                         }

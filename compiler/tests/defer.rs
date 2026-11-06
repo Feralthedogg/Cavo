@@ -33,7 +33,7 @@ fn body<'a>(
         .find(|body| {
             compilation
                 .symbols
-                .get(hir.definitions[body.definition.0 as usize].name)
+                .get(hir.definitions[body.definition].name)
                 == name
         })
         .unwrap()
@@ -47,9 +47,7 @@ fn call_name<'a>(
     let mir::Operand::Function { definition, .. } = callee else {
         panic!("direct test callee");
     };
-    compilation
-        .symbols
-        .get(hir.definitions[definition.0 as usize].name)
+    compilation.symbols.get(hir.definitions[definition].name)
 }
 
 /// Observe cleanup control flow only; call results and numeric execution are not

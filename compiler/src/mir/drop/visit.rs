@@ -61,7 +61,7 @@ pub(super) fn droppable_places(
 }
 
 fn place_type(place: &Place, core: &super::super::Body, glue: &Glues<'_>) -> Result<TyId, Error> {
-    let local = &core.locals[place.local.0 as usize];
+    let local = &core.locals[place.local];
     let mut ty = local.ty;
     let mut variant = None;
     for (index, projection) in place.projection.iter().enumerate() {
@@ -150,6 +150,12 @@ fn visit_exit(
             arguments,
             destination,
             ..
+        }
+        | T::Spawn {
+            callee,
+            arguments,
+            destination,
+            ..
         } => {
             visit_move(callee, visit)?;
             for value in arguments {
@@ -178,7 +184,13 @@ fn visit_exit(
         }
         T::Drop { place, .. } => visit(place)?,
         T::Switch { condition, .. } => visit_move(condition, visit)?,
-        T::Goto(_) | T::Bounds { .. } | T::Return | T::Resume(_) | T::Abort | T::Unreachable => {}
+        T::Goto(_)
+        | T::TaskDrain { .. }
+        | T::Bounds { .. }
+        | T::Return
+        | T::Resume(_)
+        | T::Abort
+        | T::Unreachable => {}
     }
     Ok(())
 }

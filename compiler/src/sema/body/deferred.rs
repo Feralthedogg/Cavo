@@ -99,7 +99,7 @@ impl Body<'_, '_> {
         let mut captures = BTreeMap::new();
         for (original, mutable) in modes {
             let original = LocalId(original);
-            let binding = &self.function.locals[original.0 as usize];
+            let binding = &self.function.locals[original];
             let (name, inner) = (binding.name, binding.ty);
             if mutable && !binding.mutable {
                 self.context.error(
@@ -148,7 +148,7 @@ impl Body<'_, '_> {
             let Some(&(captured, _)) = captures.get(&original.0) else {
                 continue;
             };
-            let ty = self.function.locals[captured.0 as usize].ty;
+            let ty = self.function.locals[captured].ty;
             let span = self.function.expressions[index].span;
             let operand = self.add_expr(H::Local(captured), ty, span);
             self.function.expressions[index].kind = H::Unary {

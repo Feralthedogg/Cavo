@@ -86,6 +86,9 @@ impl Glues<'_> {
         Ok(id)
     }
     fn structural_kind(&mut self, ty: TyId, depth: usize) -> Result<GlueKind, Error> {
+        if crate::tasks::task_arguments(self.hir, ty).is_some() {
+            return Ok(GlueKind::TaskHandle);
+        }
         if !self.properties.get(ty).may_drop {
             return Ok(GlueKind::Trivial);
         }
@@ -145,7 +148,7 @@ impl Glues<'_> {
         arguments: &[GenericArg],
         depth: usize,
     ) -> Result<VariantGlue, Error> {
-        let ty = self.hir.definitions[variant.0 as usize].ty;
+        let ty = self.hir.definitions[variant].ty;
         let fields = match self.hir.types.get(ty) {
             Ty::Function { parameters, .. } => parameters.clone(),
             _ => Vec::new(),

@@ -242,22 +242,45 @@ fn language_shape(program: &Program, trait_: &Trait) -> Result<(), InvariantErro
     let Some(role) = trait_.language_item else {
         return Ok(());
     };
-    if role == LanguageItem::Copy {
+    if matches!(
+        role,
+        LanguageItem::Copy
+            | LanguageItem::Send
+            | LanguageItem::Sync
+            | LanguageItem::TaskTransfer
+            | LanguageItem::SuspendSafe
+    ) {
         return require(
             trait_.methods.is_empty()
-                && trait_.supertraits.is_empty()
+                && (role != LanguageItem::Copy || trait_.supertraits.is_empty())
                 && definition(program, trait_.definition)?
                     .generic_parameter_kinds
                     .is_empty(),
-            "Copy language trait has invalid shape",
+            "auto marker language trait has invalid shape",
         );
     }
     require(
         trait_.methods.len() == 1,
         "language trait requires exactly one method",
     )?;
-    let method = &trait_.methods[0];
+    language_method_shape(program, &trait_.methods[0], role)
+}
+
+fn language_method_shape(
+    program: &Program,
+    method: &TraitMethod,
+    role: LanguageItem,
+) -> Result<(), InvariantError> {
     let declaration = definition(program, method.definition)?;
+    if matches!(
+        role,
+        LanguageItem::Fn | LanguageItem::FnMut | LanguageItem::FnOnce
+    ) {
+        require(
+            declaration.declaration_clauses.is_empty(),
+            "callable language protocols cannot add source contract obligations",
+        )?;
+    }
     let Ty::Function { parameters, result } = program.types.get(declaration.ty) else {
         return Err(error("language trait method is not callable"));
     };
@@ -269,7 +292,11 @@ fn language_shape(program: &Program, trait_: &Trait) -> Result<(), InvariantErro
             _ => None,
         });
     let valid = match role {
-        LanguageItem::Copy => unreachable!("handled above"),
+        LanguageItem::Copy
+        | LanguageItem::Send
+        | LanguageItem::Sync
+        | LanguageItem::TaskTransfer
+        | LanguageItem::SuspendSafe => unreachable!("handled above"),
         LanguageItem::Drop => {
             method.inherited_parameters == 1
                 && declaration.generic_parameter_kinds.len() == 1

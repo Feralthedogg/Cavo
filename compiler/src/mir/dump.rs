@@ -33,8 +33,8 @@ impl Printer<'_> {
     }
 
     fn definition(&self, out: &mut String, id: hir::DefId) -> fmt::Result {
-        let definition = &self.hir.definitions[id.0 as usize];
-        for name in &self.hir.modules[definition.module.0 as usize].path {
+        let definition = &self.hir.definitions[id];
+        for name in &self.hir.modules[definition.module].path {
             write!(out, "{}::", self.symbols.get(*name))?;
         }
         out.write_str(self.symbols.get(definition.name))
@@ -59,6 +59,7 @@ impl Printer<'_> {
         }
         for (index, local) in body.locals.iter().enumerate() {
             let kind = match local.kind {
+                LocalKind::TaskRegistry => "scope-registry",
                 LocalKind::Return => "return",
                 LocalKind::Parameter => "parameter",
                 LocalKind::Source => "local",
@@ -102,6 +103,12 @@ impl Printer<'_> {
 
     fn statement(&self, out: &mut String, statement: &Statement) -> fmt::Result {
         match &statement.kind {
+            StatementKind::RegistryStart(registry) => {
+                write!(out, "registry_start _{}", registry.0)?
+            }
+            StatementKind::Contract(contract) => {
+                write!(out, "contract {:?} {:?}", contract.action, contract.atom)?
+            }
             StatementKind::EnterScope(scope) => write!(out, "enter_scope s{}", scope.0)?,
             StatementKind::ExitScope(scope) => write!(out, "exit_scope s{}", scope.0)?,
             StatementKind::StorageLive(local) => write!(out, "storage_live _{}", local.0)?,
@@ -367,6 +374,32 @@ impl Printer<'_> {
 
     fn terminator(&self, out: &mut String, terminator: &Terminator) -> fmt::Result {
         match terminator {
+            Terminator::Spawn {
+                registry,
+                destination,
+                normal,
+                panic,
+                cancel,
+                ..
+            } => {
+                place(out, destination)?;
+                write!(
+                    out,
+                    " = spawn registry _{} -> normal bb{}, panic bb{}, cancel bb{}",
+                    registry.0, normal.0, panic.0, cancel.0
+                )
+            }
+            Terminator::TaskDrain {
+                scope,
+                registry,
+                exit,
+                next,
+                abort,
+            } => write!(
+                out,
+                "task_drain s{} registry _{} [{exit:?}, cancellation-masked] -> next bb{}, fatal bb{}",
+                scope.0, registry.0, next.0, abort.0
+            ),
             Terminator::Goto(target) => write!(out, "goto bb{}", target.0),
             Terminator::Switch { condition, yes, no } => {
                 out.push_str("switch ");
