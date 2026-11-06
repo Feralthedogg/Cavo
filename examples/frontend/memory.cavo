@@ -1,0 +1,21 @@
+module frontend::memory;
+
+void replace<'a>(&mut &'a i32 slot, &'a i32 value) {
+    *slot = value;
+}
+
+&'a i32 exchange<'a>(&mut &'a i32 slot, &'a i32 value) {
+    auto previous = *slot;
+    replace(&mut *slot, value);
+    return previous;
+}
+
+i32 example() {
+    i32 original = 10;
+    i32 replacement = 20;
+    auto slot = &original;
+    auto previous = exchange(&mut slot, &replacement);
+    i32 result = *previous + *slot;
+    original = 30;
+    return result;
+}

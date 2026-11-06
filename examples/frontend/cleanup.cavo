@@ -1,0 +1,23 @@
+module frontend::cleanup;
+
+void observe(i32 value) {
+}
+
+i32 sum(i32[3] values) {
+    i32 total = 0;
+    for (auto value in values) {
+        defer { observe(value); }
+        total += value;
+    }
+    return total;
+}
+
+struct Pair<T> {
+    T left;
+    T right;
+}
+
+T take_right<T>(Pair<T> pair) {
+    T first = move pair.left;
+    return move pair.right;
+}

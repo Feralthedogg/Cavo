@@ -1,0 +1,38 @@
+module frontend::regions;
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+void update(&mut Point point) {
+    auto x = &mut point.x;
+    auto y = &mut point.y;
+    *x += *y;
+    *y += 1;
+}
+
+&'a i32 first<'a, 'b>(&'a i32 value, &'b i32 other) {
+    return value;
+}
+
+&'a mut i32 again<'a>(&'a mut i32 value) {
+    return &mut *value;
+}
+
+i32 main() {
+    i32 x = 1;
+    i32 y = 2;
+    auto view = first(&x, &y);
+    y = 3; // The result is tied to x, not y.
+    i32 old = *view;
+
+    auto parent = &mut x;
+    auto child = again(&mut *parent);
+    *child += 1;
+    *parent += 2; // child has reached its last use.
+
+    Point point = Point { x: 1, y: 2 };
+    update(&mut point);
+    return x + y + old + point.x;
+}

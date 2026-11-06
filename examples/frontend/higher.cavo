@@ -1,0 +1,25 @@
+module frontend::higher;
+
+type BorrowMap = for<'a> fn(&'a i32) -> &'a i32;
+
+&'a i32 identity<'a>(&'a i32 value) {
+    return value;
+}
+
+&'inner i32 unwrap<'outer, 'inner>(&'outer &'inner i32 value) {
+    return *value;
+}
+
+i32 apply_twice(BorrowMap map) {
+    i32 first = 10;
+    i32 second = 20;
+    auto a = map(&first);
+    auto b = map(&second);
+    return *a + *b;
+}
+
+i32 example() {
+    i32 value = 3;
+    auto view = &value;
+    return *unwrap(&view) + apply_twice(identity);
+}

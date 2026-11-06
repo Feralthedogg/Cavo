@@ -1,0 +1,8 @@
+void consume(&mut i32 value) {}
+
+void run() {
+    i32 value = 0;
+    auto first = &mut value;
+    consume(move first);
+    *first = 1;
+}

@@ -1,0 +1,15 @@
+module frontend::local;
+
+void increment(&mut i32 value) {
+    *value += 1;
+}
+
+i32 main() {
+    i32 value = 0;
+    {
+        auto first = &mut value;
+        auto second = move first;
+        increment(move second);
+    }
+    return value;
+}

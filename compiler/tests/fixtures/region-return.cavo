@@ -1,0 +1,3 @@
+&'a i32 bad<'a, 'b>(&'a i32 first, &'b i32 second) {
+    return second;
+}

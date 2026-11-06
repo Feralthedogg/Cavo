@@ -1,0 +1,14 @@
+module frontend::external_memory;
+
+extern "C" {
+    void external_replace<'a>(&mut &'a i32 slot, &'a i32 value);
+}
+
+i32 example() {
+    i32 original = 10;
+    i32 replacement = 20;
+    auto slot = &original;
+    external_replace(&mut slot, &replacement);
+    original = 30;
+    return *slot;
+}

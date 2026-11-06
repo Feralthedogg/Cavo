@@ -1,0 +1,22 @@
+module frontend::fields;
+
+struct Pair {
+    i32 left;
+    i32 right;
+}
+
+void update(&mut i32 left, &mut i32 right) {
+    *left += *right;
+    *right += 1;
+}
+
+i32 main() {
+    Pair pair = Pair { left: 10, right: 20 };
+    update(&mut pair.left, &mut pair.right);
+    {
+        auto left = &mut pair.left;
+        pair.right += 2;
+        *left += pair.right;
+    }
+    return pair.left + pair.right;
+}

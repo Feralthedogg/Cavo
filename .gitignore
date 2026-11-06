@@ -1,0 +1,7 @@
+/target/
+.graph-guided/
+/docs/
+/README.md
+/cavoite.png
+/.work-*
+.DS_Store

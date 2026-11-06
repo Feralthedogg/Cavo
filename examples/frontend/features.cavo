@@ -1,0 +1,67 @@
+module frontend::features;
+
+const usize twice(usize value) {
+    return value * 2;
+}
+
+const usize WIDTH = twice(2);
+static_assert(WIDTH == 4, "the packet has four values");
+
+@align(twice(8))
+struct Packet<T, const usize N> {
+    static_assert(N > 0, "packets must not be empty");
+    T[N] values;
+}
+
+@lang(result)
+enum Outcome<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+trait Read {
+    i32 read(&Self self);
+}
+
+@lang(drop)
+trait Drop {
+    void drop(&mut Self self);
+}
+
+struct Counter {
+    i32 value;
+}
+
+impl Read for Counter {
+    i32 read(&Self self) {
+        return self.value;
+    }
+}
+
+impl Drop for Counter {
+    void drop(&mut Self self) {
+        self.value = 0;
+    }
+}
+
+Outcome<i32, i32> produce(i32 value) {
+    return Outcome::Ok(value);
+}
+
+Outcome<i32, i32> increment(i32 value) {
+    i32 next = produce(value)?;
+    return Outcome::Ok(next + 1);
+}
+
+i32 run() {
+    Packet<i32, WIDTH> packet = Packet { values: [3; WIDTH] };
+    Counter counter = Counter { value: 4 };
+    &dyn Read view = &counter;
+    auto add = [move packet](i32 value) -> i32 {
+        return packet.values[0] + value;
+    };
+    return match increment(add(view.read())) {
+        Outcome::Ok(value) => value,
+        Outcome::Err(error) => error
+    };
+}

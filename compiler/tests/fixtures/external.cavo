@@ -1,0 +1,11 @@
+module frontend::external;
+
+extern "C" {
+    &'a i32 external_identity<'a>(&'a i32 value);
+}
+
+i32 use_external() {
+    i32 value = 7;
+    auto view = external_identity(&value);
+    return *view;
+}

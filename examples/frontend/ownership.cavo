@@ -1,0 +1,25 @@
+module frontend::ownership;
+
+struct Views {
+    &mut i32 first;
+    &mut i32 second;
+}
+
+i32 main() {
+    i32 x = 1;
+    i32 y = 2;
+    Views views = Views { first: &mut x, second: &mut y };
+
+    auto first = move views.first;
+    *first += 1;
+    x = 10; // first's last use has ended its loan.
+
+    *views.second += 1; // The unmoved sibling remains available.
+    views.first = &mut x; // Restore the moved field.
+    auto restored = move views;
+    i32 total = *restored.first + *restored.second;
+
+    x += 1;
+    y += 1;
+    return total + x + y;
+}

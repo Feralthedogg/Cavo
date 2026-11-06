@@ -1,0 +1,23 @@
+module frontend::mir;
+
+i32 increment(i32 value) {
+    return value + 1;
+}
+
+T identity<T>(T value) {
+    return move value;
+}
+
+void discard<T>(T value) {
+}
+
+i32 count(bool active, i32 limit) {
+    i32 total = 0;
+    while (active && total < limit) {
+        total = increment(total);
+        if (total == 3) {
+            break;
+        }
+    }
+    return total;
+}

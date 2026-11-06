@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "id": "cavo.frontend.external-memory-example",
+  "version": "1.0.0",
+  "artifact": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "functions": [
+    {
+      "name": "frontend::external_memory::external_replace",
+      "abi": "C",
+      "signature": "sha256:8c15ebe12c09cc4414c394370a1e314177963fd514278f0cc953f495eeb76498",
+      "effects": {
+        "no_retain": true,
+        "no_free": true,
+        "no_callback": true,
+        "no_unwind": true,
+        "no_suspend": true,
+        "no_block": true,
+        "no_allocate": true,
+        "preserves_validity": true,
+        "reads": [
+          0
+        ],
+        "writes": [
+          0
+        ],
+        "stores": [
+          {
+            "target": "0.*",
+            "sources": [
+              "1"
+            ],
+            "when": "always"
+          }
+        ]
+      },
+      "returns": []
+    }
+  ]
+}

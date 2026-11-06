@@ -1,0 +1,16 @@
+[package]
+name = "cavo-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Cavo compiler frontend"
+
+[lib]
+name = "cavo_compiler"
+
+[[bin]]
+name = "cavoite"
+path = "src/bin/cavoite.rs"
+
+[lints]
+workspace = true

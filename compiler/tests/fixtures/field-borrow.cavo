@@ -1,0 +1,10 @@
+struct Pair {
+    i32 left;
+    i32 right;
+}
+
+void bad(Pair pair) {
+    auto left = &mut pair.left;
+    pair.left = 42;
+    *left += 1;
+}

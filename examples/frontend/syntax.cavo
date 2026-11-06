@@ -1,0 +1,26 @@
+// Parser coverage example. Semantic safety passes and std are still pending.
+module frontend::syntax;
+
+type ReadBuffer<'a> = &'a [byte];
+
+contract NonEmpty<T>(&[T] values) {
+    requires values.len() > 0;
+}
+
+@nopreempt
+u32 load_word(ptr<const u32> address)
+    requires Readable<u32>(address, 1)
+{
+    contract {
+        return ptr::read(address);
+    }
+}
+
+void tasks() {
+    byte[4096] bytes = [0; 4096];
+    scope requests {
+        auto child = spawn fill(&mut bytes)?;
+        auto io_result = child.join()?;
+        (move io_result)?;
+    }
+}

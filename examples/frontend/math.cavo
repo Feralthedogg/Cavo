@@ -1,0 +1,21 @@
+module frontend::math;
+
+pub type IntSlice = &[i64];
+pub type BinaryOp = fn(i64, i64) -> i64;
+
+pub struct Pair {
+    pub i64 left;
+    pub i64 right;
+}
+
+pub i64 add(i64 left, i64 right) {
+    return left + right;
+}
+
+pub T identity<T>(T value) {
+    return move value;
+}
+
+pub i64 first(IntSlice values) {
+    return values[0];
+}

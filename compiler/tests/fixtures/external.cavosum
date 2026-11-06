@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "cavo.frontend.external-example",
+  "version": "1.0.0",
+  "artifact": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "functions": [
+    {
+      "name": "frontend::external::external_identity",
+      "abi": "C",
+      "signature": "sha256:bc8e2c2ec3c7bd67e0f2400d78424840528260ba6129717ea2627d278229949f",
+      "effects": {
+        "no_retain": true,
+        "no_free": true,
+        "no_callback": true,
+        "no_unwind": true,
+        "no_suspend": true,
+        "no_block": true,
+        "no_allocate": true,
+        "preserves_validity": true,
+        "reads": [
+          0
+        ],
+        "writes": []
+      },
+      "returns": [
+        "0"
+      ]
+    }
+  ]
+}

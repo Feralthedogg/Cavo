@@ -1,0 +1,21 @@
+module frontend::app;
+import frontend::math;
+
+i32 main() {
+    i64[4] values = [1, 2, 3, 4];
+    math::Pair pair = math::Pair { left: 10, right: 20 };
+    math::BinaryOp operation = math::add;
+    i64 total = operation(pair.left, pair.right);
+
+    for (auto value in values) {
+        total += value;
+    }
+
+    total += math::first(&values);
+    total = math::identity::<i64>(total);
+    if (total == 41) {
+        return 0;
+    } else {
+        return 1;
+    }
+}

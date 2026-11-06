@@ -1,0 +1,15 @@
+[workspace]
+members = ["compiler"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = "warn"

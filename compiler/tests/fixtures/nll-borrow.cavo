@@ -1,0 +1,6 @@
+i32 bad() {
+    i32 value = 1;
+    auto view = &value;
+    value = 2;
+    return *view;
+}
