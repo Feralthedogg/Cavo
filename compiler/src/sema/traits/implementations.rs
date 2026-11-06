@@ -494,14 +494,39 @@ impl Context<'_> {
         if trait_.language_item == Some(model::LanguageItem::Drop) {
             self.validate_drop_target(&implementation);
         }
-        if trait_.language_item == Some(model::LanguageItem::Copy)
-            && !self.is_copy_type(implementation.target)
+        if trait_.language_item == Some(model::LanguageItem::Copy) {
+            self.validate_copy_implementation(&implementation);
+        }
+    }
+
+    fn validate_copy_implementation(&mut self, implementation: &model::Impl) {
+        let declaration = self.definition(implementation.definition);
+        let span = declaration.span;
+        if let Ty::Named { definition, .. } = self.program.types.get(implementation.target)
+            && self.package(self.definition(*definition).module) != self.package(declaration.module)
         {
             self.error(
-                "E-COPY-IMPL",
-                "Copy cannot be implemented for a type with non-Copy fields or a destructor",
-                self.definition(implementation.definition).span,
+                "E-IMPL-ORPHAN",
+                "Copy permission may be declared only by the package that defines the nominal type",
+                span,
             );
+            return;
+        }
+        if let Err(failure) = model::copy_eligibility(&mut self.program, implementation.target) {
+            let mut diagnostic = Diagnostic::error("E-COPY-IMPL", failure.reason, span);
+            if let Some(destructor) = failure.destructor {
+                diagnostic.labels.push(crate::diagnostic::Label {
+                    span: destructor,
+                    message: "this user Drop implementation prevents Copy".into(),
+                });
+            }
+            for field in failure.fields {
+                diagnostic.labels.push(crate::diagnostic::Label {
+                    span: field,
+                    message: "this field is not Copy under the impl's bounds".into(),
+                });
+            }
+            report(self.diagnostics, diagnostic);
         }
     }
 

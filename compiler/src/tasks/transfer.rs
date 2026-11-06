@@ -1,7 +1,7 @@
 //! Auto traits are structural obligations, not promises supplied by their names.
 use crate::{
     hir::{self, traits::LanguageItem},
-    local::properties::Properties,
+    local::properties::{Properties, Structural},
     types::{Ty, TyId},
 };
 use std::{collections::HashSet, fmt};
@@ -71,9 +71,27 @@ pub(crate) fn check(
     establish(program, properties, ty, property).map(|_| ())
 }
 
+pub(crate) fn check_structural(
+    program: &hir::Program,
+    properties: &Structural,
+    ty: TyId,
+    property: Property,
+) -> Result<(), Failure> {
+    establish_structural(program, properties, ty, property).map(|_| ())
+}
+
 pub(crate) fn establish(
     program: &hir::Program,
     properties: &Properties,
+    ty: TyId,
+    property: Property,
+) -> Result<std::collections::BTreeSet<hir::DefId>, Failure> {
+    establish_structural(program, properties, ty, property)
+}
+
+fn establish_structural(
+    program: &hir::Program,
+    properties: &Structural,
     ty: TyId,
     property: Property,
 ) -> Result<std::collections::BTreeSet<hir::DefId>, Failure> {
@@ -89,7 +107,7 @@ pub(crate) fn establish(
 
 struct Checker<'a> {
     program: &'a hir::Program,
-    properties: &'a Properties,
+    properties: &'a Structural,
     pending: Vec<(TyId, Property)>,
     visited: HashSet<(TyId, Property)>,
     trusted: std::collections::BTreeSet<hir::DefId>,

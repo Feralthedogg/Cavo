@@ -143,6 +143,27 @@ fn offline_git_miss_does_not_create_a_partial_checkout() {
 }
 
 #[test]
+fn a_local_copy_trait_cannot_grant_copy_to_a_dependency_type() {
+    let project = Project::new();
+    project.setup("pub");
+    project.put(
+        "lib/src/lib.cavo",
+        "module math; pub struct Token { i32 value; }",
+    );
+    project.put("app/src/main.cavo","module app; import library::math; @lang(copy) trait Copy {} impl Copy for math::Token {} void main() {}");
+    let graph = packages::resolve(&project.manifest(), false, true).unwrap();
+    let compilation = compile(&graph);
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E-IMPL-ORPHAN"),
+        "{:#?}",
+        compilation.diagnostics
+    );
+}
+
+#[test]
 fn cli_lock_check_and_capsule_round_trip_work_without_source_dependencies() {
     let project = Project::new();
     project.setup("pub");

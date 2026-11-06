@@ -4,6 +4,7 @@ mod constants;
 mod layout;
 mod literal;
 mod moves;
+pub(crate) use moves::suggest_copy;
 pub(crate) use moves::{requires_execution_mir, validate as validate_moves};
 mod attributes;
 mod contracts;
@@ -22,6 +23,18 @@ use crate::{
     types::{Region, Ty, TyId, TypeContext},
 };
 use std::collections::{HashMap, HashSet};
+
+fn package_identity(
+    program: &hir::Program,
+    symbols: &Interner,
+    module: ModuleId,
+) -> Option<Symbol> {
+    program.modules[module]
+        .path
+        .first()
+        .copied()
+        .filter(|name| symbols.get(*name).starts_with("__cavo_pkg_"))
+}
 
 pub fn check(
     ast: &Ast,
@@ -904,11 +917,7 @@ impl Context<'_> {
     }
 
     fn package(&self, module: ModuleId) -> Option<Symbol> {
-        self.program.modules[module]
-            .path
-            .first()
-            .copied()
-            .filter(|name| self.symbols.get(*name).starts_with("__cavo_pkg_"))
+        package_identity(&self.program, self.symbols, module)
     }
     fn lookup(&self, module: ModuleId, path: &[Name]) -> Option<DefId> {
         if path.len() == 1 {

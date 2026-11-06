@@ -9,6 +9,8 @@ use crate::{
     types::Ty,
 };
 use std::collections::HashSet;
+mod copy_hint;
+pub(crate) use copy_hint::suggest as suggest_copy;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Use {

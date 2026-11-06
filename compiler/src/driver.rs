@@ -304,7 +304,20 @@ fn emit_success(
                     )?;
                     return Ok(1);
                 };
-                output.write_all(crate::external::interface::render(&interface).as_bytes())?;
+                let Some(copy) = crate::external::interface::copy_permissions(
+                    program,
+                    &compilation.symbols,
+                    &compilation.sources,
+                ) else {
+                    writeln!(
+                        error,
+                        "cavoite: Copy interface identities exceed their resource limit"
+                    )?;
+                    return Ok(1);
+                };
+                output.write_all(
+                    crate::external::interface::render_with_copy(&interface, &copy).as_bytes(),
+                )?;
             } else if emit == Emit::Hir {
                 writeln!(
                     output,
