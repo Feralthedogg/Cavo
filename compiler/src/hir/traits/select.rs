@@ -141,6 +141,16 @@ pub fn require_trait(
     .obligation(target, reference.clone(), 0)
 }
 
+pub(super) fn copy(program: &mut Program, target: TyId) -> bool {
+    Bounds {
+        program,
+        active: HashSet::new(),
+        remaining: 4096,
+    }
+    .copy_type(target, 0)
+    .is_ok()
+}
+
 pub fn supertraits(
     program: &mut Program,
     reference: &TraitRef,
@@ -226,12 +236,7 @@ impl Bounds<'_> {
             trait_.definition == required.definition
                 && trait_.language_item == Some(LanguageItem::Copy)
         }) {
-            let properties = crate::local::properties::Properties::compute(self.program);
-            return if properties.get(target).copy {
-                Ok(())
-            } else {
-                Err(error("type does not satisfy structural Copy"))
-            };
+            return self.copy_type(target, depth + 1);
         }
         if validate_closure_trait(self.program, target, &required)? {
             return self.parents(target, &required, depth + 1);
@@ -244,11 +249,69 @@ impl Bounds<'_> {
             .and_then(|trait_| trait_.language_item)
             .and_then(crate::tasks::transfer::Property::from_role);
         if let Some(property) = property {
-            let properties = crate::local::properties::Properties::compute(self.program);
-            crate::tasks::transfer::check(self.program, &properties, target, property)
+            let properties = crate::local::properties::Structural::compute(self.program);
+            crate::tasks::transfer::check_structural(self.program, &properties, target, property)
                 .map_err(|message| error(&message.to_string()))?;
             return self.parents(target, &required, depth + 1);
         }
+        self.implementation(target, required, depth)
+    }
+
+    fn copy_type(&mut self, target: TyId, depth: usize) -> Result<(), SelectionError> {
+        self.charge(depth)?;
+        match self.program.types.get(target).clone() {
+            Ty::Void
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Integer { .. }
+            | Ty::Float { .. }
+            | Ty::Pointer { .. }
+            | Ty::Function { .. }
+            | Ty::ForAll { .. }
+            | Ty::Reference { mutable: false, .. } => Ok(()),
+            Ty::Array { inner, .. } | Ty::SymbolicArray { inner, .. } => {
+                self.copy_type(inner, depth + 1)
+            }
+            Ty::Parameter { owner, index }
+                if parameter_has_role(self.program, owner, index, LanguageItem::Copy) =>
+            {
+                Ok(())
+            }
+            Ty::Named { .. } => {
+                if crate::tasks::task_arguments(self.program, target).is_some()
+                    || has_drop(self.program, target)
+                {
+                    return Err(error(
+                        "owning task handles and types with user Drop cannot be Copy",
+                    ));
+                }
+                let definition = self
+                    .program
+                    .traits
+                    .iter()
+                    .find(|item| item.language_item == Some(LanguageItem::Copy))
+                    .map(|item| item.definition)
+                    .ok_or_else(|| error("nominal type has no Copy declaration"))?;
+                self.implementation(
+                    target,
+                    TraitRef {
+                        definition,
+                        arguments: Vec::new(),
+                    },
+                    depth + 1,
+                )
+            }
+            _ => Err(error("type has no permission to copy its value")),
+        }
+    }
+
+    fn implementation(
+        &mut self,
+        target: TyId,
+        required: TraitRef,
+        depth: usize,
+    ) -> Result<(), SelectionError> {
+        self.charge(depth)?;
         let key = (target, required.clone());
         if !self.active.insert(key.clone()) {
             return Err(error(

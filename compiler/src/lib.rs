@@ -88,6 +88,7 @@ impl Compilation {
         }
         let path = if sema::requires_execution_mir(&mut program) {
             sema::validate_moves(&mut program, &mut self.diagnostics);
+            sema::suggest_copy(&mut program, &self.symbols, &mut self.diagnostics);
             AnalysisPath::ExecutionMir
         } else {
             AnalysisPath::SourceCfg
@@ -132,6 +133,7 @@ impl Compilation {
             );
         }
         self.local_analysis = Some(report);
+        sema::suggest_copy(program, &self.symbols, &mut self.diagnostics);
         self.diagnostics.is_empty().then_some(())
     }
 

@@ -140,7 +140,7 @@ fn record_fields_and_whole_records_keep_their_payload_shapes() {
         "struct Holder<T> { T view; i32 tag; } void set<'a>(&mut Holder<&'a i32> h,&'a i32 value) { h.view=value; } i32 f<'a>(Holder<&'a i32> h,&'a i32 value) { set(&mut h,value); h.tag=3; return *h.view; }",
     );
     passes(
-        "struct Holder<T> { T view; i32 tag; } void set<'a>(&mut Holder<&'a i32> h,Holder<&'a i32> value) { *h=value; } i32 f<'a>(Holder<&'a i32> h,Holder<&'a i32> value) { set(&mut h,value); return *h.view; }",
+        "struct Holder<T> { T view; i32 tag; } void set<'a>(&mut Holder<&'a i32> h,Holder<&'a i32> value) { *h=move value; } i32 f<'a>(Holder<&'a i32> h,Holder<&'a i32> value) { set(&mut h,move value); return *h.view; }",
     );
 }
 

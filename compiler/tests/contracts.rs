@@ -290,7 +290,7 @@ fn generic_take_does_not_reuse_an_entry_initialization_premise() {
 #[test]
 fn copied_raw_pointer_wrappers_preserve_their_known_borrow_origins() {
     rejected(
-        "struct Wrapper { ptr<i32> p; } void f() { i32 value = 1; auto p = address_mut(&mut value); Wrapper first = Wrapper { p: p }; Wrapper second = first; value = 2; contract { i32 n = read_mut(second.p); } }",
+        "struct Wrapper { ptr<i32> p; } impl Copy for Wrapper {} void f() { i32 value = 1; auto p = address_mut(&mut value); Wrapper first = Wrapper { p: p }; Wrapper second = first; value = 2; contract { i32 n = read_mut(second.p); } }",
         "E-MIR-BORROW",
     );
 }
@@ -298,7 +298,7 @@ fn copied_raw_pointer_wrappers_preserve_their_known_borrow_origins() {
 #[test]
 fn union_writes_update_copies_and_nested_union_tags() {
     checked(
-        "union Bits { u32 integer; bool bit; } struct Outer { u32 tag; Bits bits; } bool f() { contract { Bits a = Bits { integer: 2 }; a.bit = true; Bits b = a; return b.bit; } }",
+        "union Bits { u32 integer; bool bit; } struct Outer { u32 tag; Bits bits; } impl Copy for Bits {} bool f() { contract { Bits a = Bits { integer: 2 }; a.bit = true; Bits b = a; return b.bit; } }",
     );
     rejected(
         "union Bits { u32 integer; bool bit; } struct Outer { u32 tag; Bits bits; } bool f() { contract { Outer value = Outer { tag: 0, bits: Bits { integer: 2 } }; value.tag = 1; return value.bits.bit; } }",

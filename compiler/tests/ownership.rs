@@ -71,18 +71,18 @@ fn reinitializing_a_moved_field_restores_the_complete_owner() {
 #[test]
 fn field_by_field_initialization_requires_every_field_on_every_path() {
     passes(&format!(
-        "{PAIR} Pair<i32> f() {{ Pair<i32> pair; pair.left = 1; pair.right = 2; return pair; }}"
+        "{PAIR} Pair<i32> f() {{ Pair<i32> pair; pair.left = 1; pair.right = 2; return move pair; }}"
     ));
     passes(&format!(
-        "{PAIR} Pair<i32> f(bool c) {{ Pair<i32> pair; pair.left = 1; if (c) {{ pair.right = 2; }} else {{ pair.right = 3; }} return pair; }}"
+        "{PAIR} Pair<i32> f(bool c) {{ Pair<i32> pair; pair.left = 1; if (c) {{ pair.right = 2; }} else {{ pair.right = 3; }} return move pair; }}"
     ));
     fails(
-        &format!("{PAIR} Pair<i32> f() {{ Pair<i32> pair; pair.left = 1; return pair; }}"),
+        &format!("{PAIR} Pair<i32> f() {{ Pair<i32> pair; pair.left = 1; return move pair; }}"),
         "E-INIT-READ",
     );
     fails(
         &format!(
-            "{PAIR} Pair<i32> f(bool c) {{ Pair<i32> pair; pair.left = 1; if (c) {{ pair.right = 2; }} return pair; }}"
+            "{PAIR} Pair<i32> f(bool c) {{ Pair<i32> pair; pair.left = 1; if (c) {{ pair.right = 2; }} return move pair; }}"
         ),
         "E-INIT-READ",
     );
@@ -149,7 +149,7 @@ fn partial_moves_keep_reference_origins_in_the_correct_field() {
 #[test]
 fn full_record_moves_preserve_nested_reference_payloads() {
     passes(
-        "struct Inner { &i32 view; } struct Outer { Inner first; Inner second; } i32 f() { i32 x = 1; i32 y = 2; Outer outer = Outer { first: Inner { view: &x }, second: Inner { view: &y } }; Outer copy = outer; i32 old = *copy.second.view; y = 3; return *copy.first.view + old; }",
+        "struct Inner { &i32 view; } struct Outer { Inner first; Inner second; } i32 f() { i32 x = 1; i32 y = 2; Outer outer = Outer { first: Inner { view: &x }, second: Inner { view: &y } }; Outer copy = move outer; i32 old = *copy.second.view; y = 3; return *copy.first.view + old; }",
     );
 }
 

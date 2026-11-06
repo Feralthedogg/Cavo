@@ -104,6 +104,18 @@ fn native_integer_calls_branches_and_loops() {
 }
 
 #[test]
+fn native_nominal_moves_and_explicit_copies_preserve_value_storage() {
+    run(
+        "struct Data { i32 value; } i32 main() { Data first = Data { value: 3 }; Data second = move first; return second.value + second.value; }",
+        6,
+    );
+    run(
+        "@lang(copy) trait Copy {} struct Data { i32 value; } impl Copy for Data {} i32 main() { Data first = Data { value: 3 }; Data second = first; return first.value + second.value; }",
+        6,
+    );
+}
+
+#[test]
 fn native_aggregate_and_enum_layouts_preserve_payload_offsets() {
     run(
         "enum Choice { No, Yes(i32) } struct Pair { byte tag; Choice choice; } i32 main() { Pair pair = Pair { tag: 1, choice: Choice::Yes(37) }; return match pair.choice { Choice::Yes(value) => value, Choice::No => 0 }; }",

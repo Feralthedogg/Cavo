@@ -28,13 +28,6 @@ impl Body<'_, '_> {
         let ty = self.ty(subject);
         let properties = Properties::compute(&mut self.context.program);
         let view = self.pattern_subject(ty);
-        if view.borrow.is_none() && !properties.get(ty).copy && !self.explicit_match_move(value) {
-            self.context.error(
-                "E-MATCH-MOVE",
-                "matching an owned non-Copy value requires `move`",
-                span,
-            );
-        }
         let temporary = self.pattern_temporary(ty, span);
         let before = self.states.clone();
         let mut checked = Vec::with_capacity(arms.len());
@@ -64,6 +57,14 @@ impl Body<'_, '_> {
         }
         self.merge_match_exits(&before, &exits);
         self.check_match_coverage(view.ty, &checked, span);
+        let subject = if view.borrow.is_none()
+            && !properties.get(ty).copy
+            && !self.explicit_match_move(value)
+        {
+            self.inspect_match(subject, temporary, &checked, span)
+        } else {
+            subject
+        };
         let result = result.unwrap_or(TyId::VOID);
         for arm in &checked {
             if self.expression_diverges(arm.value) {
@@ -77,6 +78,39 @@ impl Body<'_, '_> {
                 arms: checked,
             },
             result,
+            span,
+        )
+    }
+
+    fn inspect_match(
+        &mut self,
+        subject: ExprId,
+        temporary: LocalId,
+        arms: &[hir::MatchArm],
+        span: Span,
+    ) -> ExprId {
+        let moved = arms.iter().find_map(|arm| moving_binding(&arm.pattern));
+        if let Some(binding) = moved {
+            let diagnostic=Diagnostic::error("E-MATCH-MOVE","binding a non-Copy payload by value requires an explicitly moved match subject",binding)
+                .help("use `match (move value)` to consume it, or match a reference to borrow its payload");
+            report(self.context.diagnostics, diagnostic);
+            return subject;
+        }
+        // Tests and Copy payload reads borrow the original value. Moving it to
+        // the hidden match temporary would consume it despite a non-moving pattern.
+        let region = self.context.program.types.fresh_region();
+        let ty = self.context.program.types.intern(Ty::Reference {
+            region,
+            mutable: false,
+            inner: self.ty(subject),
+        });
+        self.function.locals[temporary].ty = ty;
+        self.add_expr(
+            H::Unary {
+                op: U::Borrow,
+                operand: subject,
+            },
+            ty,
             span,
         )
     }
@@ -467,6 +501,21 @@ impl Body<'_, '_> {
             _ => false,
         }
     }
+}
+
+fn moving_binding(root: &Pattern) -> Option<Span> {
+    let mut pending = vec![root];
+    while let Some(pattern) = pending.pop() {
+        match &pattern.kind {
+            PatternKind::Binding {
+                mode: BindingMode::Move,
+                ..
+            } => return Some(pattern.span),
+            PatternKind::Variant { fields, .. } => pending.extend(fields),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn expression_children(kind: &H, output: &mut Vec<ExprId>) {

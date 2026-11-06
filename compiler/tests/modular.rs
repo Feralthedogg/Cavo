@@ -214,7 +214,7 @@ fn hiding_a_body_preserves_the_trust_of_its_worker_frame() {
     };
     let module = capsule::build(vec![Source {
         name: "owner.cavo".into(),
-        text: "@lang(send) trait Send {} struct Owner { ptr<i32> p; } contract impl Send for Owner because \"allocation follows its owner\"; pub Owner identity(Owner value) { return value; }".into(),
+        text: "@lang(send) trait Send {} struct Owner { ptr<i32> p; } contract impl Send for Owner because \"allocation follows its owner\"; pub Owner identity(Owner value) { return move value; }".into(),
     }]).unwrap();
     let mut compilation = Compilation::default();
     module.load_into(&mut compilation).unwrap();

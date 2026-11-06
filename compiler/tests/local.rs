@@ -80,13 +80,15 @@ fn non_copy_moves_require_spelling_and_invalidate_the_old_owner() {
 }
 
 #[test]
-fn structural_copy_includes_generic_records_and_enum_payloads() {
-    passes(
-        "struct Wrap<T> { T value; } Wrap<i32> copy(Wrap<i32> first) { Wrap<i32> second = first; return first; }",
-    );
-    passes(
-        "enum Choice<T> { None, Some(T) } Choice<i32> copy(Choice<i32> first) { Choice<i32> second = first; return first; }",
-    );
+fn declared_copy_checks_generic_record_and_enum_impl_bounds() {
+    for source in [
+        "@lang(copy) trait Copy {} struct Wrap<T> { T value; } impl<T: Copy> Copy for Wrap<T> {} Wrap<i32> duplicate(Wrap<i32> first) { Wrap<i32> second = first; return first; }",
+        "@lang(copy) trait Copy {} enum Choice<T> { None, Some(T) } impl<T: Copy> Copy for Choice<T> {} Choice<i32> duplicate(Choice<i32> first) { Choice<i32> second = first; return first; }",
+    ] {
+        let (compilation, program) = checked(source);
+        assert!(program.is_some(), "{:#?}", compilation.diagnostics);
+        assert!(compilation.mir_analysis.is_some());
+    }
     fails(
         "struct Wrap<T> { T value; } Wrap<T> bad<T>(Wrap<T> first) { Wrap<T> second = first; return move second; }",
         "E-MOVE-EXPLICIT",

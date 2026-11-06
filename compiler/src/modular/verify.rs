@@ -73,7 +73,9 @@ fn validate_union_storage(
         }
         if properties.get(local.ty).may_drop
             || properties.get(local.ty).references
-            || !properties.get(local.ty).copy
+            || properties
+                .fields(local.ty)
+                .is_none_or(|fields| fields.iter().any(|&ty| !properties.get(ty).copy))
         {
             report.diagnostics.push(Diagnostic::error("E-UNION-FIELD",
                 "union storage requires Copy fields without embedded references; use raw pointers and explicit initialization contracts for opaque storage", local.span));

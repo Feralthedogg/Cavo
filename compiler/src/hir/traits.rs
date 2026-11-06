@@ -4,6 +4,9 @@ use super::DefId;
 use crate::arena::Access as _;
 use crate::types::{GenericArg, TyId};
 mod callable;
+mod copy;
+pub(crate) use copy::eligibility as copy_eligibility;
+pub(crate) use copy::implementations as copy_implementations;
 mod verify;
 pub(crate) use verify::validate;
 mod select;
@@ -12,6 +15,12 @@ pub(crate) use select::Matcher;
 pub use select::supertraits;
 pub use select::{SelectionError, check_bounds, select_drop, select_method, select_trait};
 pub use select::{check_bounds as validate_arguments, require_trait};
+
+/// Built-ins have language-defined permission; nominal values require a checked
+/// Copy impl and its ordinary trait-bound obligations. This is the sole query.
+pub fn is_copy(program: &mut super::Program, ty: TyId) -> bool {
+    select::copy(program, ty)
+}
 
 pub fn has_drop(program: &super::Program, ty: TyId) -> bool {
     matches!(program.types.get(ty), crate::types::Ty::Named { .. })

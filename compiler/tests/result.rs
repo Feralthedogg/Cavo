@@ -23,7 +23,7 @@ fn failed(source: &str) -> Compilation {
 #[test]
 fn question_mark_returns_only_the_error_variant_and_continues_on_success() {
     let source = format!(
-        "{RESULT} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ i32 number = value?; return Outcome::Ok(number + 1); }}"
+        "{RESULT} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ i32 number = (move value)?; return Outcome::Ok(number + 1); }}"
     );
     let (compilation, hir, mir) = checked(&source);
     let ok = definition(&compilation, &hir, "Ok");
@@ -57,7 +57,7 @@ fn question_mark_transfers_non_copy_success_values_without_duplicate_drop() {
 #[test]
 fn question_mark_runs_registered_cleanup_before_error_return() {
     let source = format!(
-        "{RESULT} void mark(i32 n) {{}} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ defer {{ mark(1); }} i32 number = value?; return Outcome::Ok(number); }}"
+        "{RESULT} void mark(i32 n) {{}} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ defer {{ mark(1); }} i32 number = (move value)?; return Outcome::Ok(number); }}"
     );
     let (compilation, hir, mir) = checked(&source);
     let err = definition(&compilation, &hir, "Err");
@@ -80,7 +80,7 @@ fn question_mark_runs_registered_cleanup_before_error_return() {
 #[test]
 fn differing_error_types_require_a_real_from_implementation() {
     let source = format!(
-        "{RESULT} struct Failure {{ i32 code; }} Outcome<i32, Failure> f(Outcome<i32, i32> value) {{ i32 number = value?; return Outcome::Ok(number); }}"
+        "{RESULT} struct Failure {{ i32 code; }} Outcome<i32, Failure> f(Outcome<i32, i32> value) {{ i32 number = (move value)?; return Outcome::Ok(number); }}"
     );
     let compilation = failed(&source);
     assert!(
@@ -96,7 +96,7 @@ fn differing_error_types_require_a_real_from_implementation() {
 #[test]
 fn error_conversion_selects_the_declared_from_implementation() {
     let source = format!(
-        "{RESULT} @lang(from) trait Convert<T> {{ Self from(T value); }} struct Failure {{ i32 code; }} impl Convert<i32> for Failure {{ Failure from(i32 value) {{ return Failure {{ code: value }}; }} }} Outcome<i32, Failure> f(Outcome<i32, i32> value) {{ i32 number = value?; return Outcome::Ok(number); }}"
+        "{RESULT} @lang(from) trait Convert<T> {{ Self from(T value); }} struct Failure {{ i32 code; }} impl Convert<i32> for Failure {{ Failure from(i32 value) {{ return Failure {{ code: value }}; }} }} Outcome<i32, Failure> f(Outcome<i32, i32> value) {{ i32 number = (move value)?; return Outcome::Ok(number); }}"
     );
     let (compilation, hir, mir) = checked(&source);
     let err = definition(&compilation, &hir, "Err");
@@ -118,7 +118,7 @@ fn error_conversion_selects_the_declared_from_implementation() {
 #[test]
 fn similarly_named_enums_do_not_become_result_language_items() {
     let compilation = failed(
-        "enum Result<T, E> { Ok(T), Err(E) } Result<i32, i32> f(Result<i32, i32> value) { i32 x = value?; return Result::Ok(x); }",
+        "enum Result<T, E> { Ok(T), Err(E) } Result<i32, i32> f(Result<i32, i32> value) { i32 x = (move value)?; return Result::Ok(x); }",
     );
     assert!(
         compilation
@@ -147,7 +147,7 @@ fn result_language_items_reject_bad_shapes_and_duplicate_providers() {
 #[test]
 fn propagation_is_an_explicit_typed_match_with_an_early_return_arm() {
     let (compilation, hir, mir) = checked(&format!(
-        "{RESULT} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ return Outcome::Ok(value?); }}"
+        "{RESULT} Outcome<i32, i32> f(Outcome<i32, i32> value) {{ return Outcome::Ok((move value)?); }}"
     ));
     assert!(
         hir.functions[0]

@@ -7,6 +7,8 @@ use crate::{
     types::{ConstKind, ConstValue, GenericArg, Region, Ty, TyId},
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+mod copy;
+pub use copy::{CopyPermission, permissions as copy_permissions};
 
 #[derive(Debug)]
 pub struct InterfaceFunction {
@@ -79,6 +81,7 @@ impl Encoder<'_> {
             _ => "opaque",
         });
         self.attrs(def)?;
+        self.copy_permissions(definition)?;
         if let Some(record) = self
             .program
             .records
@@ -388,6 +391,10 @@ pub fn interfaces(
 }
 
 pub fn render(functions: &[InterfaceFunction]) -> String {
+    render_with_copy(functions, &[])
+}
+
+pub fn render_with_copy(functions: &[InterfaceFunction], permissions: &[CopyPermission]) -> String {
     fn quoted(text: &str) -> String {
         use std::fmt::Write;
         let mut result = String::from("\"");
@@ -416,5 +423,23 @@ pub fn render(functions: &[InterfaceFunction]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!("{{\n  \"schema\": 1,\n  \"functions\": [\n{entries}\n  ]\n}}\n")
+    let permissions = permissions
+        .iter()
+        .map(|permission| {
+            format!(
+                "{{\"type\":{},\"explicit_impls\":[{}]}}",
+                quoted(&permission.name),
+                permission
+                    .explicit_impls
+                    .iter()
+                    .map(|digest| quoted(&digest.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\n  \"schema\": 1,\n  \"functions\": [\n{entries}\n  ],\n  \"copy_permissions\": [{permissions}]\n}}\n"
+    )
 }
