@@ -39,6 +39,9 @@ prepare_macos_llvm() (
         "$bottles/llvm--23.1.2.arm64_tahoe.bottle.tar.gz"
     export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
     export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+    # Homebrew 7 reads local bottle metadata only with this process-local opt-in.
+    # The CI guard and checksum verification above precede all package operations.
+    export HOMEBREW_DEVELOPER=1 HOMEBREW_NO_ANALYTICS=1
     prefix=$(brew --prefix)
     cellar=$(brew --cellar)
     if [[ ! -f $prefix/opt/zstd/lib/libzstd.1.dylib ]]; then
