@@ -8,6 +8,57 @@ cd -- "$root"
 export CARGO_INCREMENTAL=0 CAVO_NATIVE_REQUIRED=1 CAVO_MANAGED_REQUIRED=1
 export PYTHONDONTWRITEBYTECODE=1
 
+fetch_bottle() {
+    local name=$1 digest=$2 destination=$3 token
+    token=$(curl --fail --silent --show-error \
+        "https://ghcr.io/token?service=ghcr.io&scope=repository:homebrew/core/$name:pull" | \
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+    curl --fail --location --retry 3 \
+        --header "Authorization: Bearer $token" \
+        "https://ghcr.io/v2/homebrew/core/$name/blobs/sha256:$digest" \
+        --output "$destination"
+    printf '%s  %s\n' "$digest" "$destination" | shasum -a 256 --check
+}
+
+prepare_macos_llvm() (
+    if [[ ${GITHUB_ACTIONS:-} != true ]]; then
+        printf '%s\n' 'For local macOS builds, set CAVO_LLVM_BIN to a qualified LLVM 23.1.2 installation.' >&2
+        return 1
+    fi
+    local bottles cellar prefix
+    mkdir -p -- "$root/target/cavo-ci"
+    bottles=$(mktemp -d "$root/target/cavo-ci/bottles.XXXXXX")
+    trap 'rm -f -- "$bottles/llvm--23.1.2.arm64_tahoe.bottle.tar.gz" "$bottles/z3--5.1.0.arm64_tahoe.bottle.tar.gz"; rmdir -- "$bottles"' EXIT
+    # The official Darwin archive lacks a shared LLVM target. Pin the qualified
+    # Homebrew producer and its Z3 SONAME rather than tracking current formulae.
+    # homebrew-core: llvm@3a7173a0f17234264c8711d59918002522d13623,
+    #               z3@af6aac9be7aa9bb9158db6607c13be5711f21090.
+    fetch_bottle z3 5968f6ca3a4c4f2b12e4711b9ca7556fa65a82937f1af7a2a210456ab754adb7 \
+        "$bottles/z3--5.1.0.arm64_tahoe.bottle.tar.gz"
+    fetch_bottle llvm bc2ff4fa3f9359d3b8b49d70cb1782f9b63040d050ca1316c047d65ed799ec6e \
+        "$bottles/llvm--23.1.2.arm64_tahoe.bottle.tar.gz"
+    export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+    export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+    prefix=$(brew --prefix)
+    cellar=$(brew --cellar)
+    if [[ ! -f $prefix/opt/zstd/lib/libzstd.1.dylib ]]; then
+        brew install --formula zstd
+    fi
+    # Dependencies are provided explicitly: installing the current Z3 formula
+    # would replace the ABI 5.1 required by this pinned LLVM bottle.
+    for package in z3 llvm; do
+        if brew list --versions "$package" >/dev/null 2>&1; then
+            brew unlink "$package"
+        fi
+    done
+    brew install --formula --force --overwrite --ignore-dependencies \
+        "$bottles/z3--5.1.0.arm64_tahoe.bottle.tar.gz" \
+        "$bottles/llvm--23.1.2.arm64_tahoe.bottle.tar.gz"
+    [[ -f $prefix/opt/z3/lib/libz3.5.1.dylib ]]
+    [[ -f $cellar/llvm/23.1.2/lib/libLLVM.23.1.dylib ]]
+    [[ $("$cellar/llvm/23.1.2/bin/llvm-config" --version) == 23.1.2 ]]
+)
+
 prepare_llvm() {
     local asset digest archive prefix
     if [[ -n ${CAVO_LLVM_BIN:-} ]]; then
@@ -19,8 +70,10 @@ prepare_llvm() {
             asset=LLVM-23.1.2-Linux-X64.tar.zst
             digest=6382de1c1a210ce5a5cc49d18bc8444d137742e7cbf9b19f4ae602bb1ab52534 ;;
         Darwin-arm64)
-            asset=LLVM-23.1.2-macOS-ARM64.tar.xz
-            digest=d7c26fc6177e42842e2d1ffaad31aec057c56a924392b1a23d830abe2c5d53b1 ;;
+            prepare_macos_llvm
+            CAVO_LLVM_BIN="$(brew --cellar)/llvm/23.1.2/bin"
+            export CAVO_LLVM_BIN
+            return ;;
         *) printf '%s\n' 'This qualification script supports Linux x86_64 and macOS ARM64.' >&2; return 1 ;;
     esac
     prefix="$root/target/cavo-ci/llvm-23.1.2"

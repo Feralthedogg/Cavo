@@ -262,6 +262,15 @@ fn contract_diagnostic_marks_the_call_and_uses_the_source_function_name() {
         diagnostic.message,
         "cannot establish the required contract for `read_word`"
     );
+    assert_eq!(
+        diagnostic.primary_label.as_deref(),
+        Some("the evidence required for this operation is not established")
+    );
+    let rendered = diagnostic.render(&compilation.sources);
+    assert!(
+        rendered
+            .contains("^^^^^^^^^^^^ the evidence required for this operation is not established")
+    );
     assert!(
         diagnostic
             .notes
@@ -492,6 +501,16 @@ fn return_escape_reports_the_return_without_its_cleanup_cascade() {
         assert!(compilation.check().is_none());
         let codes: Vec<_> = compilation.diagnostics.iter().map(|d| d.code).collect();
         assert_eq!(codes, ["E-BORROW-RETURN"]);
+        assert_eq!(
+            compilation.diagnostics[0].primary_label.as_deref(),
+            Some("this reference would outlive its local owner")
+        );
+        let rendered = compilation.diagnostics[0].render(&compilation.sources);
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("^ this reference would outlive its local owner"))
+        );
         let report = compilation.local_analysis.as_ref().unwrap();
         assert_eq!(report.verdict, Verdict::Rejected);
         let failed: Vec<_> = report

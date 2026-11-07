@@ -139,6 +139,7 @@ impl Problem<'_> {
                     span,
                 );
                 diagnostic
+                    .primary_label("this reference would outlive its local owner")
                     .label(storage, "local storage is declared here")
                     .label(borrow, "reference borrows this storage")
                     .help("return an owned value or a reference tied to an input")

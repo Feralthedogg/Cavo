@@ -85,7 +85,8 @@ impl Report {
                 code,
                 format!("{message} for `{}`", obligation.operation),
                 obligation.span,
-            );
+            )
+            .primary_label(obligation_label(code));
             diagnostic.notes.push(format!(
                 "analysis coverage: {}",
                 coverage_text(obligation.coverage())
@@ -150,6 +151,14 @@ impl Report {
             }
         }
         output
+    }
+}
+
+fn obligation_label(code: &str) -> &'static str {
+    match code {
+        "E-CONTRACT-003" => "the evidence required for this operation is not established",
+        "E-CONTRACT-004" => "this operation violates its required contract",
+        _ => "the required safety analysis is incomplete",
     }
 }
 
