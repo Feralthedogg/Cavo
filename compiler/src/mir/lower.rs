@@ -243,6 +243,13 @@ impl<'a> Builder<'a> {
         self.body.blocks[self.current.take().expect("unterminated lowering block").0 as usize]
             .terminator = terminator;
     }
+    fn terminate_at(&mut self, terminator: Terminator, span: Span) {
+        let block = self.current.expect("unterminated lowering block");
+        // Statements carry their own spans; the block span locates its final
+        // operation, which may be far narrower than the block's lexical scope.
+        self.body.blocks[block].span = span;
+        self.terminate(terminator);
+    }
     fn goto(&mut self, target: BlockId) {
         if self.current.is_some() {
             self.terminate(Terminator::Goto(target));
@@ -987,16 +994,19 @@ impl<'a> Builder<'a> {
         let normal = self.new_block(span, None)?;
         let panic = self.abnormal(ExitKind::Panic)?;
         let cancel = self.abnormal(ExitKind::Cancel)?;
-        self.terminate(Terminator::Call {
-            callee: function.expect("non-variant callee"),
-            type_arguments: type_arguments.to_vec(),
-            arguments: values,
-            parameter_types: parameter_types.to_vec(),
-            destination: Place::local(local),
-            normal,
-            panic,
-            cancel,
-        });
+        self.terminate_at(
+            Terminator::Call {
+                callee: function.expect("non-variant callee"),
+                type_arguments: type_arguments.to_vec(),
+                arguments: values,
+                parameter_types: parameter_types.to_vec(),
+                destination: Place::local(local),
+                normal,
+                panic,
+                cancel,
+            },
+            span,
+        );
         self.current = Some(normal);
         Ok(self.take(Place::local(local), ty))
     }

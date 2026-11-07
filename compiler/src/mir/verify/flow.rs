@@ -19,6 +19,7 @@ struct State {
     registries: Vec<Registry>,
     live: Vec<bool>,
     init: Vec<Init>,
+    moves: Vec<Option<MoveCause>>,
     captures: Vec<Option<usize>>,
     predicates: Vec<Option<usize>>,
     scopes: Vec<ScopeId>,
@@ -33,6 +34,32 @@ enum Registry {
     MayOwn,
     Drained,
     Inconsistent,
+}
+
+impl MoveCause {
+    fn join(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(Self {
+                span: if span_key(left.span) <= span_key(right.span) {
+                    left.span
+                } else {
+                    right.span
+                },
+                certainty: if left.certainty == MoveCertainty::Definite
+                    && right.certainty == MoveCertainty::Definite
+                {
+                    MoveCertainty::Definite
+                } else {
+                    MoveCertainty::Possible
+                },
+            }),
+            (Some(cause), None) | (None, Some(cause)) => Some(Self {
+                certainty: MoveCertainty::Possible,
+                ..cause
+            }),
+            (None, None) => None,
+        }
+    }
 }
 
 impl Registry {
@@ -56,6 +83,7 @@ impl State {
             registries: vec![Registry::Closed; body.locals.len()],
             live: vec![false; body.locals.len()],
             init: vec![Init::No; paths.leaves],
+            moves: vec![None; paths.leaves],
             captures: vec![None; body.locals.len()],
             predicates: vec![None; body.locals.len()],
             scopes: Vec::new(),
@@ -83,6 +111,14 @@ impl State {
             changed |= *old != joined;
             *old = joined;
         }
+        // A definite cause must hold on both paths, even when both are Init::No:
+        // one path can be moved while the other was never initialized. Evidence
+        // never changes the initialization lattice; strong writes clear it.
+        for (old, new) in self.moves.iter_mut().zip(other.moves) {
+            let joined = MoveCause::join(*old, new);
+            changed |= *old != joined;
+            *old = joined;
+        }
         changed |= intersect_slots(&mut self.captures, other.captures);
         changed |= intersect_slots(&mut self.predicates, other.predicates);
         let before = self.bounds.len() + self.variants.len();
@@ -95,6 +131,10 @@ impl State {
         self.variants.clear();
         self.predicates.fill(None);
     }
+}
+
+fn span_key(span: Span) -> (crate::source::FileId, u32, u32) {
+    (span.file, span.start, span.end)
 }
 
 fn intersect_slots(slots: &mut [Option<usize>], other: Vec<Option<usize>>) -> bool {
@@ -139,7 +179,7 @@ struct Worklist {
 }
 impl Worklist {
     fn new(body: &Body, paths: &Paths) -> Self {
-        let width = paths.leaves + body.locals.len() * 3 + body.scopes.len();
+        let width = paths.leaves * 2 + body.locals.len() * 3 + body.scopes.len();
         let mut inputs = vec![None; body.blocks.len()];
         inputs[body.entry.0 as usize] = Some(State::new(body, paths));
         let mut queued = vec![false; body.blocks.len()];
@@ -192,6 +232,7 @@ struct Flow<'a, 'p> {
     verifier: &'a Verifier<'p>,
     paths: Paths,
     sites: Sites<'p>,
+    source_span: Span,
 }
 impl Verifier<'_> {
     pub(super) fn flow(&self) -> Result<(), InvariantError> {
@@ -199,13 +240,14 @@ impl Verifier<'_> {
             verifier: self,
             paths: Paths::build(self.body, self.properties)?,
             sites: Sites::build(self.body),
+            source_span: self.source.body.span,
         }
         .run()
     }
 }
 
 impl Flow<'_, '_> {
-    fn run(&self) -> Result<(), InvariantError> {
+    fn run(mut self) -> Result<(), InvariantError> {
         let body = self.verifier.body;
         let mut work = Worklist::new(body, &self.paths);
         require(
@@ -220,6 +262,7 @@ impl Flow<'_, '_> {
             .max()
             .unwrap_or(1)
             .max(1);
+        let mut rejected = None;
         while let Some(id) = work.queue.pop_front() {
             work.queued[id.0 as usize] = false;
             let block = body.block(id);
@@ -232,14 +275,24 @@ impl Flow<'_, '_> {
                 .as_ref()
                 .expect("queued state")
                 .clone();
-            let edges = self
-                .transfer(id, block, &mut state)
-                .map_err(|error| error.context(format!("bb{}", id.0)))?;
+            let edges = match self.transfer(id, block, &mut state) {
+                Ok(edges) => edges,
+                Err(error) if error.user_code().is_some() => {
+                    // Rejection is sticky and an invalid operation contributes
+                    // no successors. Finish other reaching paths so a first
+                    // visited path cannot masquerade as a definite move.
+                    if rejected.as_ref().is_none_or(|(block, _)| *block == id) {
+                        rejected = Some((id, error.context(format!("bb{}", id.0))));
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.context(format!("bb{}", id.0))),
+            };
             for (target, state) in edges {
                 work.push(body, target, state)?;
             }
         }
-        Ok(())
+        rejected.map_or(Ok(()), |(_, error)| Err(error))
     }
 
     fn guards(&self, place: &Place, state: &State) -> Result<(), InvariantError> {
@@ -319,8 +372,9 @@ impl Flow<'_, '_> {
         match projection {
             Projection::Deref => {
                 if let Some(node) = access.node {
-                    require(
-                        self.paths.initialized(node, state),
+                    self.initialized(
+                        node,
+                        state,
                         "dereference of an uninitialized or moved value",
                     )?;
                 }
@@ -342,10 +396,7 @@ impl Flow<'_, '_> {
                         !access.indexed,
                         "indexed enum projections require a captured reference",
                     )?;
-                    require(
-                        self.paths.tag_initialized(node, state),
-                        "variant tag is uninitialized or moved",
-                    )?;
+                    self.initialized_tag(node, state)?;
                     access.protected |= self.paths.protected(node);
                     access.tags.push(node);
                     access.node = Some(self.paths.variant(node, variant)?);
@@ -365,24 +416,37 @@ impl Flow<'_, '_> {
 
     fn read(&self, place: &Place, state: &State) -> Result<Access, InvariantError> {
         let access = self.access(place, state, 0)?;
-        if let Some(node) = access.node
-            && !self.paths.initialized(node, state)
-        {
-            return Err(InvariantError::unavailable(
-                "read of an uninitialized or moved value",
-            ));
+        if let Some(node) = access.node {
+            self.initialized(node, state, "read of an uninitialized or moved value")?;
         }
         Ok(access)
     }
     fn read_tag(&self, place: &Place, state: &State) -> Result<(), InvariantError> {
         let access = self.access(place, state, 0)?;
         if let Some(node) = access.node {
-            require(
-                self.paths.tag_initialized(node, state),
-                "read of an uninitialized or moved variant tag",
-            )?;
+            self.initialized_tag(node, state)?;
         }
         Ok(())
+    }
+    fn initialized(&self, node: usize, state: &State, message: &str) -> Result<(), InvariantError> {
+        if self.paths.initialized(node, state) {
+            Ok(())
+        } else {
+            Err(InvariantError::unavailable(
+                message,
+                self.paths.moved_at(node, state),
+            ))
+        }
+    }
+    fn initialized_tag(&self, node: usize, state: &State) -> Result<(), InvariantError> {
+        if self.paths.tag_initialized(node, state) {
+            Ok(())
+        } else {
+            Err(InvariantError::unavailable(
+                "read of an uninitialized or moved variant tag",
+                self.paths.tag_move(node, state),
+            ))
+        }
     }
     fn consume(&self, operand: &Operand, state: &mut State) -> Result<(), InvariantError> {
         match operand {
@@ -408,6 +472,7 @@ impl Flow<'_, '_> {
                 }
                 self.invalidate_captures(&access, state);
                 self.paths.set(&access, state, Init::No);
+                self.paths.moved(&access, state, self.source_span);
             }
             Operand::Constant { .. }
             | Operand::ConstTerm { .. }

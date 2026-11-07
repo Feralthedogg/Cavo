@@ -28,19 +28,68 @@ pub(in crate::mir::borrow) fn known(
             return None;
         }
         let normal = summary.normal.as_ref()?;
-        if summary
-            .accesses
-            .iter()
-            .any(|access| access.write && access.target.input != 0)
-            || normal.writes.iter().any(|write| {
-                write.target.input != 0 || !write.value.fields.is_empty() || write.value.unknown
-            })
-        {
+        if summary.accesses.iter().any(|access| {
+            access.write
+                && access.target.input != 0
+                && !scalar_target(method, &access.target, context)
+        }) || normal.writes.iter().any(|write| {
+            write.target.input != 0 && !scalar_target(method, &write.target, context)
+                || !write.value.fields.is_empty()
+                || write.value.unknown
+        }) {
             return None;
         }
         assumptions.extend(&summary.assumptions);
     }
     Some(assumptions)
+}
+
+fn scalar_target(method: hir::DefId, target: &Footprint, context: &Context<'_>) -> bool {
+    let Some(frame) = context.summaries.frames[method.0 as usize].as_ref() else {
+        return false;
+    };
+    let Some(input) = frame.inputs.get(target.input as usize) else {
+        return false;
+    };
+    let Ty::Reference { inner, .. } = context.hir.types.get(input.ty) else {
+        return false;
+    };
+    let mut ty = *inner;
+    let mut variant = None;
+    for step in &target.path {
+        ty = match step {
+            Step::Variant(selected) => {
+                variant = Some(*selected);
+                continue;
+            }
+            Step::Field(field) => {
+                let fields = variant.take().map_or_else(
+                    || context.properties.fields(ty),
+                    |variant| context.properties.variant_fields(ty, variant),
+                );
+                let Some(&field) = fields.and_then(|fields| fields.get(*field as usize)) else {
+                    return false;
+                };
+                field
+            }
+            Step::Element => match context.hir.types.get(ty) {
+                Ty::Array { inner, .. } | Ty::SymbolicArray { inner, .. } | Ty::Slice(inner) => {
+                    *inner
+                }
+                _ => return false,
+            },
+            Step::Deref => match context.hir.types.get(ty) {
+                Ty::Reference { inner, .. } => *inner,
+                _ => return false,
+            },
+        };
+    }
+    // Scalar data does not change loan, raw-pointer, callable or vtable identity.
+    // Aggregate/reference stores still require full destructor summary replay.
+    matches!(
+        context.hir.types.get(ty),
+        Ty::Bool | Ty::Char | Ty::Integer { .. } | Ty::Float { .. }
+    )
 }
 
 fn methods(ty: TyId, hir: &hir::Program, properties: &Properties) -> Option<BTreeSet<hir::DefId>> {

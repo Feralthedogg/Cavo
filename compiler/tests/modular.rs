@@ -39,6 +39,45 @@ fn public_reference_stores_are_declared_and_implementation_checked() {
 }
 
 #[test]
+fn changing_a_public_implementation_keeps_the_same_declared_caller_contract() {
+    let header = "@effects(reads(value), writes(slot.*), normal(slot.* = value)) pub void set<'a>(&mut &'a i32 slot, &'a i32 value)";
+    for body in [
+        "*slot = value;",
+        "auto replacement = value; *slot = replacement;",
+    ] {
+        accepted(&format!(
+            "{header} {{ {body} }} void use() {{ i32 a = 1; i32 b = 2; auto r = &a; set(&mut r, &b); a = 3; i32 n = *r; }}"
+        ));
+        rejected(
+            &format!(
+                "{header} {{ {body} }} void use() {{ i32 a = 1; i32 b = 2; auto r = &a; set(&mut r, &b); b = 3; i32 n = *r; }}"
+            ),
+            "E-MIR-BORROW",
+        );
+    }
+}
+
+#[test]
+fn hiding_a_public_body_requires_an_explicit_export_contract() {
+    use cavo_compiler::modular::capsule::{self, Source};
+    let sources = vec![Source {
+        name: "library.cavo".into(),
+        text: "module library; pub i32 answer() { return 7; }".into(),
+    }];
+    let error = capsule::build(sources).unwrap_err();
+    assert!(error.contains("E-MODULE-CONTRACT"), "{error}");
+    assert!(error.contains("@effects(...)"), "{error}");
+}
+
+#[test]
+fn a_no_retention_promise_rejects_outward_reference_storage() {
+    rejected(
+        "@effects(no_retain) pub void retain<'a>(&mut &'a i32 slot, &'a i32 value) { *slot = value; }",
+        "E-EFFECT-REFINE",
+    );
+}
+
+#[test]
 fn omitted_frames_are_conservative_and_never_inferred_from_public_bodies() {
     for body in [
         "",
@@ -214,7 +253,7 @@ fn hiding_a_body_preserves_the_trust_of_its_worker_frame() {
     };
     let module = capsule::build(vec![Source {
         name: "owner.cavo".into(),
-        text: "@lang(send) trait Send {} struct Owner { ptr<i32> p; } contract impl Send for Owner because \"allocation follows its owner\"; pub Owner identity(Owner value) { return move value; }".into(),
+        text: "@lang(send) trait Send {} struct Owner { ptr<i32> p; } contract impl Send for Owner because \"allocation follows its owner\"; @effects() pub Owner identity(Owner value) { return move value; }".into(),
     }]).unwrap();
     let mut compilation = Compilation::default();
     module.load_into(&mut compilation).unwrap();

@@ -12,6 +12,7 @@ impl Context<'_> {
             trait_type,
             generics,
             trusted_reason,
+            negative,
             ..
         } = &item.kind
         else {
@@ -59,6 +60,7 @@ impl Context<'_> {
             .impl_indices
             .insert(owner, self.program.implementations.len());
         self.program.implementations.push(model::Impl {
+            negative: *negative,
             definition: owner,
             target: TyId::ERROR,
             trait_ref: None,

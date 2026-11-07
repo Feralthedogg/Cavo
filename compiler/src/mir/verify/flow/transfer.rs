@@ -2,12 +2,13 @@ use super::*;
 
 impl Flow<'_, '_> {
     pub(super) fn transfer(
-        &self,
+        &mut self,
         id: BlockId,
         block: &Block,
         state: &mut State,
     ) -> Result<Edges, InvariantError> {
         for (index, statement) in block.statements.iter().enumerate() {
+            self.source_span = statement.span;
             self.statement(
                 &statement.kind,
                 self.sites.blocks[id.0 as usize][index],
@@ -15,6 +16,7 @@ impl Flow<'_, '_> {
             )
             .map_err(|error| error.at(statement.span))?;
         }
+        self.source_span = block.span;
         self.exit(&block.terminator, state)
             .map_err(|error| error.at(block.span))
     }

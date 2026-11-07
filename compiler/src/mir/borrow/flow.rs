@@ -1078,7 +1078,15 @@ impl<'a, 'b, R: Reporter> Evaluator<'a, 'b, R> {
                     permissions: Loans::from([loan]),
                     unknown: value.unknown || state.loans[loan.0 as usize].unknown,
                 };
-                self.check(&borrowed, Access::Read, state);
+                // A user destructor can use its retained mutable capabilities.
+                // Treating them as read-only would permit a live shared child
+                // loan to overlap the destructor's writes.
+                let access = if self.context.loans[loan.0 as usize].mutable {
+                    Access::Write
+                } else {
+                    Access::Read
+                };
+                self.check(&borrowed, access, state);
             }
         }
         clear_value(&target, state);

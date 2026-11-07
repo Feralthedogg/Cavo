@@ -175,7 +175,7 @@ fn finish(
         mir::lower(&mut hir).map_err(|error| problem(error.span, "E-MONO-LOWER", error.message))?;
     mir.validate(&mut hir)
         .map_err(|error| problem(span, "E-MONO-VERIFY", error.to_string()))?;
-    let layout_roots = storage_types(&mir, &hir)?;
+    let layout_roots = storage_types(&mir, &mut hir)?;
     let layouts = layout::compute(
         &mut hir,
         options.target,
@@ -212,19 +212,85 @@ fn finish(
     })
 }
 
-fn storage_types(program: &mir::Program, hir: &hir::Program) -> Result<Vec<TyId>, Error> {
+fn storage_types(program: &mir::Program, hir: &mut hir::Program) -> Result<Vec<TyId>, Error> {
+    use crate::types::Ty;
+    let properties = crate::local::properties::Structural::compute(hir);
     let mut seen = HashSet::new();
     let mut roots = Vec::new();
-    for body in &program.functions {
-        for local in &body.locals {
-            types::require_concrete(&hir.types, local.ty)
-                .map_err(|message| problem(local.span, "E-MONO-TYPE", message))?;
-            if local.kind != mir::LocalKind::Address && seen.insert(local.ty) {
-                roots.push(local.ty);
+    let mut pending = storage_seeds(program);
+    while let Some((ty, span, depth)) = pending.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        if depth >= 128 || seen.len() > 200_000 {
+            return Err(problem(
+                span,
+                "E-MONO-LIMIT",
+                "concrete storage layout closure exceeds its type budget",
+            ));
+        }
+        types::require_concrete(&hir.types, ty)
+            .map_err(|message| problem(span, "E-MONO-TYPE", message))?;
+        if !matches!(
+            hir.types.get(ty),
+            Ty::Str | Ty::Slice(_) | Ty::Dynamic { .. }
+        ) {
+            roots.push(ty);
+        }
+        // A pointer's own layout does not resolve its referent. Native place
+        // projections and Drop glue also require the concrete referenced shape.
+        match hir.types.get(ty) {
+            Ty::Reference { inner, .. }
+            | Ty::Pointer { inner, .. }
+            | Ty::Array { inner, .. }
+            | Ty::SymbolicArray { inner, .. }
+            | Ty::Slice(inner) => {
+                pending.push((*inner, span, depth + 1));
             }
+            Ty::Named { .. } => {
+                if let Some(fields) = properties.fields(ty) {
+                    pending.extend(fields.iter().map(|&ty| (ty, span, depth + 1)));
+                    continue;
+                }
+                let Some(variants) = properties.enum_variants(ty) else {
+                    continue;
+                };
+                for &variant in variants {
+                    let Some(fields) = properties.variant_fields(ty, variant) else {
+                        continue;
+                    };
+                    pending.extend(fields.iter().map(|&ty| (ty, span, depth + 1)));
+                }
+            }
+            _ => {}
         }
     }
     Ok(roots)
+}
+
+fn storage_seeds(program: &mir::Program) -> Vec<(TyId, Span, usize)> {
+    let mut seeds = Vec::new();
+    for body in &program.functions {
+        seeds.extend(body.locals.iter().map(|local| (local.ty, local.span, 0)));
+        for block in &body.blocks {
+            // Call ABI references can carry different lifetime identities from
+            // argument locals even though their physical storage shape agrees.
+            let parameters = match &block.terminator {
+                mir::Terminator::Call {
+                    parameter_types, ..
+                }
+                | mir::Terminator::DynCall {
+                    parameter_types, ..
+                }
+                | mir::Terminator::Spawn {
+                    parameter_types, ..
+                } => parameter_types,
+                _ => continue,
+            };
+            seeds.extend(parameters.iter().map(|&ty| (ty, block.span, 0)));
+        }
+    }
+    seeds
 }
 
 struct Builder<'a> {

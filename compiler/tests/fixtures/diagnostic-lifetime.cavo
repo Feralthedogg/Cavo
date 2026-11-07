@@ -1,0 +1,8 @@
+i32 inspect() {
+    &i32 view;
+    {
+        i32 value = 1;
+        view = &value;
+    }
+    return *view;
+}

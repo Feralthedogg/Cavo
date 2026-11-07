@@ -578,6 +578,14 @@ impl Parser<'_> {
     }
     fn implementation(&mut self, trusted: bool) -> Parsed<ItemKind> {
         let generics = self.generics()?;
+        let negative = self.eat(T::Bang);
+        if negative && trusted {
+            self.error(
+                "E-IMPL-POLARITY",
+                "negative impls are restrictions and cannot use `contract impl` or `because`",
+            );
+            return Err(());
+        }
         let first = self.ty()?;
         let (trait_type, target) = if self.eat_kw(K::For) {
             (Some(first), self.ty()?)
@@ -596,6 +604,7 @@ impl Parser<'_> {
             (None, self.item_block()?)
         };
         Ok(ItemKind::Impl {
+            negative,
             generics,
             trait_type,
             target,
@@ -1195,6 +1204,10 @@ impl Parser<'_> {
                 {
                     self.eat(T::ColonColon);
                     let type_arguments = self.type_arguments()?;
+                    if self.eat(T::ColonColon) {
+                        left = self.type_member(left, type_arguments, start)?;
+                        continue;
+                    }
                     let arguments = self.arguments(mode)?;
                     left = self.ast.add_expr(
                         ExprKind::Call {
@@ -1260,6 +1273,28 @@ impl Parser<'_> {
             );
         }
         Ok(left)
+    }
+    fn type_member(
+        &mut self,
+        owner: ExprId,
+        arguments: Vec<GenericArg>,
+        start: Span,
+    ) -> Parsed<ExprId> {
+        let ExprKind::Path(path) = &self.ast.expr(owner).kind else {
+            self.error(
+                "E-PARSE-TYPE-PATH",
+                "generic owner arguments require a nominal type path before `::`",
+            );
+            return Err(());
+        };
+        let path = path.clone();
+        let owner = self
+            .ast
+            .add_type(TypeKind::Path { path, arguments }, self.span_from(start));
+        let name = self.name()?;
+        Ok(self
+            .ast
+            .add_expr(ExprKind::TypeMember { owner, name }, self.span_from(start)))
     }
     fn prefix(&mut self, mode: Mode) -> Parsed<ExprId> {
         let token = self.current();

@@ -82,6 +82,12 @@ impl Encoder<'_> {
         });
         self.attrs(def)?;
         self.copy_permissions(definition)?;
+        self.token("negative-markers-v1");
+        let restrictions = negative_markers(self.program, definition);
+        self.number(restrictions.len() as u64);
+        for restriction in restrictions {
+            self.token(restriction);
+        }
         if let Some(record) = self
             .program
             .records
@@ -427,12 +433,18 @@ pub fn render_with_copy(functions: &[InterfaceFunction], permissions: &[CopyPerm
         .iter()
         .map(|permission| {
             format!(
-                "{{\"type\":{},\"explicit_impls\":[{}]}}",
+                "{{\"type\":{},\"explicit_impls\":[{}],\"negative_traits\":[{}]}}",
                 quoted(&permission.name),
                 permission
                     .explicit_impls
                     .iter()
                     .map(|digest| quoted(&digest.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                permission
+                    .negative_traits
+                    .iter()
+                    .map(|name| quoted(name))
                     .collect::<Vec<_>>()
                     .join(",")
             )
@@ -442,4 +454,14 @@ pub fn render_with_copy(functions: &[InterfaceFunction], permissions: &[CopyPerm
     format!(
         "{{\n  \"schema\": 1,\n  \"functions\": [\n{entries}\n  ],\n  \"copy_permissions\": [{permissions}]\n}}\n"
     )
+}
+
+fn negative_markers(program: &hir::Program, definition: hir::DefId) -> Vec<&'static str> {
+    let mut restrictions: Vec<_> = hir::traits::negative_roles(program, definition)
+        .filter_map(crate::tasks::transfer::Property::from_role)
+        .map(crate::tasks::transfer::Property::name)
+        .collect();
+    restrictions.sort_unstable();
+    restrictions.dedup();
+    restrictions
 }

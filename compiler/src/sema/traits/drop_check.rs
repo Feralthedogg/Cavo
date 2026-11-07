@@ -51,7 +51,7 @@ impl Context<'_> {
         }
     }
 
-    fn drop_covers_nominal(
+    pub(super) fn drop_covers_nominal(
         &self,
         implementation: DefId,
         nominal: DefId,
@@ -100,7 +100,7 @@ impl Context<'_> {
         }
     }
 
-    fn nominal_drop_bounds(
+    pub(super) fn nominal_drop_bounds(
         &mut self,
         nominal: DefId,
         arguments: &[GenericArg],

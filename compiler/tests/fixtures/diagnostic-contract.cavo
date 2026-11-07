@@ -1,0 +1,8 @@
+@lang(copy) trait Copy {}
+@intrinsic(ptr_read) T read_word<T: Copy>(ptr<const T> address);
+
+i32 inspect(ptr<const i32> p) {
+    contract {
+        return read_word(p);
+    }
+}

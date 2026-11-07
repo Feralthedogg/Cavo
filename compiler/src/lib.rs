@@ -157,12 +157,15 @@ impl Compilation {
     pub fn check_executable(&mut self) -> Option<mono::Program> {
         let mut input = self.prepare_input()?;
         self.build_mir(&mut input.program, &input.summaries)?;
+        let internal = input.program.internal_definitions();
         let roots = mono::default_roots(&input.program)
             .into_iter()
             .filter(|key| {
-                self.symbols
-                    .get(input.program.definitions[key.definition].name)
-                    == "main"
+                !internal.contains(&key.definition)
+                    && self
+                        .symbols
+                        .get(input.program.definitions[key.definition].name)
+                        == "main"
             })
             .collect::<Vec<_>>();
         if roots.len() != 1 {
@@ -209,17 +212,15 @@ impl Compilation {
             }
         };
         if let Err(error) = mir.validate(hir) {
-            if let Some(code) = error.user_code() {
-                let span = error.span.unwrap_or_else(|| {
-                    self.sources
-                        .files()
-                        .first()
-                        .map_or(source::Span::new(FileId(0), 0, 0), |file| {
-                            source::Span::new(file.id, 0, 0)
-                        })
+            let fallback = self
+                .sources
+                .files()
+                .first()
+                .map_or(source::Span::new(FileId(0), 0, 0), |file| {
+                    source::Span::new(file.id, 0, 0)
                 });
-                self.diagnostics
-                    .push(Diagnostic::error(code, error.to_string(), span));
+            if let Some(diagnostic) = error.user_diagnostic(fallback) {
+                self.diagnostics.push(diagnostic);
             } else {
                 self.frontend_error("E-MIR-INTERNAL", format!("invalid MIR artifact: {error}"));
             }

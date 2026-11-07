@@ -124,9 +124,7 @@ impl Engine<'_> {
                 arguments,
                 ..
             } => {
-                if let Some(&intrinsic) = self.context.hir.contracts.intrinsics.get(definition) {
-                    self.intrinsic_request(intrinsic, arguments, span, state, report)?;
-                }
+                self.intrinsic_request(*definition, arguments, span, state, report)?;
             }
             Terminator::Checked { value, .. } => self.value_requests(value, span, state, report)?,
             Terminator::Return
@@ -175,12 +173,15 @@ impl Engine<'_> {
 
     fn intrinsic_request(
         &self,
-        role: Intrinsic,
+        definition: hir::DefId,
         arguments: &[Operand],
         span: Span,
         state: &State,
         report: &mut Report,
     ) -> Result<(), String> {
+        let Some(&role) = self.context.hir.contracts.intrinsics.get(&definition) else {
+            return Ok(());
+        };
         let Some(first) = arguments.first() else {
             return Err("intrinsic has no input".into());
         };
@@ -208,7 +209,7 @@ impl Engine<'_> {
             count: Some(1),
             ty,
             unaligned: matches!(role, Intrinsic::ReadUnaligned | Intrinsic::WriteUnaligned),
-            operation: format!("{role:?}"),
+            operation: self.operation_name(definition, span).into(),
             span,
             other: None,
         };
@@ -221,7 +222,7 @@ impl Engine<'_> {
             self.request(
                 Request {
                     predicate,
-                    operation: operation.into(),
+                    operation: format!("{}: {operation}", request.operation),
                     ..request.clone()
                 },
                 false,
@@ -233,6 +234,18 @@ impl Engine<'_> {
             self.initialization_request(&request.value, ty, span, state, report)?;
         }
         Ok(())
+    }
+
+    fn operation_name(&self, definition: hir::DefId, span: Span) -> &str {
+        self.context
+            .call_names
+            .get(&span)
+            .copied()
+            .unwrap_or_else(|| {
+                self.context
+                    .symbols
+                    .get(self.context.hir.definitions[definition].name)
+            })
     }
 
     fn initialization_request(

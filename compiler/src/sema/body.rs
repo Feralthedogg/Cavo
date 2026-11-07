@@ -882,6 +882,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 type_arguments,
                 arguments,
             } => return self.call(*callee, type_arguments, arguments, expected, source.span),
+            A::TypeMember { owner, name } => self.type_member_value(*owner, *name, source.span),
             A::Field { base, name } => {
                 if let A::Path(path) = &ast.expr(*base).kind
                     && !(path.len() == 1 && self.find_local(path[0].symbol).is_some())

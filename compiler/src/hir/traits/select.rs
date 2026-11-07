@@ -89,6 +89,9 @@ pub fn select_trait(
 ) -> Result<Option<(usize, Vec<GenericArg>)>, SelectionError> {
     let mut selected = None;
     for (index, implementation) in program.implementations.iter().enumerate() {
+        if implementation.negative {
+            continue;
+        }
         let Some(found) = &implementation.trait_ref else {
             continue;
         };

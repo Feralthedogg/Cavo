@@ -3,6 +3,15 @@
 //! check. Diagnostic strings and evidence arenas exist only in `Diagnostics`.
 use super::*;
 
+// One borrow origin and up to four representative uses of expired storage.
+const MAX_LIFETIME_LABELS: usize = 5;
+
+pub(super) enum AvailabilityFailure {
+    Moved(MoveCertainty),
+    Uninitialized,
+    StorageEnded,
+}
+
 pub(super) enum Problem<'a> {
     Signature(super::super::regions::SignatureProblem),
     Unsupported {
@@ -24,15 +33,18 @@ pub(super) enum Problem<'a> {
         span: Span,
         storage: Span,
         borrow: Span,
+        owner: hir::LocalId,
     },
     StorageEnd {
         span: Span,
         loan: EventId,
+        end: EventId,
+        owner: hir::LocalId,
     },
     Availability {
         span: Span,
         binding: Option<Span>,
-        flags: u8,
+        failure: AvailabilityFailure,
         causes: &'a Causes,
     },
     Conflict {
@@ -119,6 +131,7 @@ impl Problem<'_> {
                 span,
                 storage,
                 borrow,
+                ..
             } => {
                 let diagnostic = Diagnostic::error(
                     "E-BORROW-RETURN",
@@ -130,7 +143,7 @@ impl Problem<'_> {
                     .label(borrow, "reference borrows this storage")
                     .help("return an owned value or a reference tied to an input")
             }
-            Self::StorageEnd { span, loan } => {
+            Self::StorageEnd { span, loan, .. } => {
                 let diagnostic = Diagnostic::error(
                     "E-BORROW-LIFETIME",
                     "borrowed local storage does not live long enough",
@@ -147,37 +160,9 @@ impl Problem<'_> {
             Self::Availability {
                 span,
                 binding,
-                flags,
+                failure,
                 causes,
-            } => {
-                let moved = flags & MOVED != 0;
-                let (code, message, label, help) = if moved {
-                    (
-                        "E-MOVE-USE",
-                        "value may have been moved before this use",
-                        "this place is not available on every incoming path",
-                        "use the new owner, or reinitialize this binding before using it",
-                    )
-                } else {
-                    (
-                        "E-INIT-READ",
-                        "binding is not initialized on every path",
-                        "used here before it is definitely initialized",
-                        "initialize this binding on every path before using it",
-                    )
-                };
-                let mut diagnostic = Diagnostic::error(code, message, span).primary_label(label);
-                if let Some(binding) = binding {
-                    diagnostic = diagnostic.label(binding, "binding declared here");
-                }
-                for &cause in causes {
-                    if graph.event(cause).kind == super::super::EventKind::Move {
-                        diagnostic =
-                            diagnostic.label(graph.event(cause).span, "ownership moved here");
-                    }
-                }
-                diagnostic.help(help)
-            }
+            } => availability(span, binding, failure, causes, graph),
             Self::Conflict { span, loan } => {
                 let diagnostic = Diagnostic::error(
                     "E-BORROW-CONFLICT",
@@ -220,6 +205,52 @@ impl Problem<'_> {
             }
         }
     }
+}
+
+fn ended_storage(span: Span, causes: &Causes, graph: &Graph) -> Diagnostic {
+    let mut diagnostic = Diagnostic::error(
+        "E-BORROW-LIFETIME",
+        "cannot access storage after its lifetime has ended",
+        span,
+    )
+    .primary_label("this reference refers to storage that is no longer alive");
+    for &cause in causes {
+        let event = graph.event(cause);
+        if event.kind == super::super::EventKind::StorageEnd {
+            diagnostic = diagnostic.label(event.span, "storage lifetime ends here");
+        }
+    }
+    diagnostic
+        .help("keep the owner alive as long as the reference, or shorten the reference's scope")
+}
+
+fn availability(
+    span: Span,
+    binding: Option<Span>,
+    failure: AvailabilityFailure,
+    causes: &Causes,
+    graph: &Graph,
+) -> Diagnostic {
+    let mut diagnostic = match failure {
+        AvailabilityFailure::StorageEnded => return ended_storage(span, causes, graph),
+        AvailabilityFailure::Moved(certainty) => certainty.diagnostic(span),
+        AvailabilityFailure::Uninitialized => Diagnostic::error(
+            "E-INIT-READ",
+            "binding is not initialized on every path",
+            span,
+        )
+        .primary_label("used here before it is definitely initialized")
+        .help("initialize this binding on every path before using it"),
+    };
+    if let Some(binding) = binding {
+        diagnostic = diagnostic.label(binding, "binding declared here");
+    }
+    for &cause in causes {
+        if graph.event(cause).kind == super::super::EventKind::Move {
+            diagnostic = diagnostic.label(graph.event(cause).span, "ownership moved here");
+        }
+    }
+    diagnostic
 }
 
 pub(super) struct Check<'a> {
@@ -271,8 +302,11 @@ pub(super) struct Diagnostics<'a> {
     pub graph: &'a Graph,
     pub evidence: Vec<Evidence>,
     pub findings: Vec<Finding>,
-    pub diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
     pub reborrows: Vec<Reborrow>,
+    storage_ends: HashMap<EventId, usize>,
+    lifetime_owners: HashMap<usize, hir::LocalId>,
+    returned_owners: HashSet<hir::LocalId>,
 }
 impl<'a> Diagnostics<'a> {
     pub fn new(graph: &'a Graph) -> Self {
@@ -285,7 +319,55 @@ impl<'a> Diagnostics<'a> {
             findings: Vec::new(),
             diagnostics: Vec::new(),
             reborrows: Vec::new(),
+            storage_ends: HashMap::new(),
+            lifetime_owners: HashMap::new(),
+            returned_owners: HashSet::new(),
         }
+    }
+
+    pub fn take_diagnostics(&mut self) -> impl Iterator<Item = Diagnostic> + '_ {
+        // A return error already explains why this owner's storage cannot end.
+        // Defer coalescing until replay finishes: cleanup order and reborrows
+        // can produce different loan events for the same storage owner.
+        std::mem::take(&mut self.diagnostics)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, diagnostic)| {
+                let duplicate = self
+                    .lifetime_owners
+                    .get(&index)
+                    .is_some_and(|owner| self.returned_owners.contains(owner));
+                (!duplicate).then_some(diagnostic)
+            })
+    }
+
+    fn lifetime_cascade(&mut self, problem: &Problem<'_>) -> bool {
+        let Problem::Availability {
+            span,
+            failure: AvailabilityFailure::StorageEnded,
+            causes,
+            ..
+        } = problem
+        else {
+            return false;
+        };
+        for &cause in *causes {
+            if let Some(&index) = self.storage_ends.get(&cause) {
+                let diagnostic = &mut self.diagnostics[index];
+                // Several locals can end at the same closing brace. Merge by
+                // their event identity, and bound repeated use-site annotations.
+                if diagnostic.labels.len() < MAX_LIFETIME_LABELS
+                    && !diagnostic.labels.iter().any(|label| label.span == *span)
+                {
+                    diagnostic.labels.push(crate::diagnostic::Label {
+                        span: *span,
+                        message: "reference used after this storage ends".into(),
+                    });
+                }
+                return true;
+            }
+        }
+        false
     }
 }
 impl Reporter for Diagnostics<'_> {
@@ -317,7 +399,31 @@ impl Reporter for Diagnostics<'_> {
     }
     fn problem(&mut self, problem: Problem<'_>) {
         self.status.failed = true;
+        // Coalesce only a matching ended-storage cause. The failed finding and
+        // evidence remain recorded, and unrelated initialization errors survive.
+        if self.lifetime_cascade(&problem) {
+            return;
+        }
+        let ended = match &problem {
+            Problem::StorageEnd { end, owner, .. } => Some((*end, *owner)),
+            _ => None,
+        };
+        let returned = match &problem {
+            Problem::LocalReturn { owner, .. } => Some(*owner),
+            _ => None,
+        };
+        let index = self.diagnostics.len();
         report(&mut self.diagnostics, problem.diagnostic(self.graph));
+        if self.diagnostics.len() == index {
+            return;
+        }
+        if let Some((end, owner)) = ended {
+            self.storage_ends.insert(end, index);
+            self.lifetime_owners.insert(index, owner);
+        }
+        if let Some(owner) = returned {
+            self.returned_owners.insert(owner);
+        }
     }
     fn reborrow(&mut self, point: Point, loan: LoanId, event: EventId, parents: &[LoanId]) {
         self.reborrows.push(Reborrow {

@@ -128,6 +128,7 @@ pub enum ItemKind {
         methods: Vec<ItemId>,
     },
     Impl {
+        negative: bool,
         generics: Vec<GenericParam>,
         trait_type: Option<TypeId>,
         target: TypeId,
@@ -247,6 +248,10 @@ pub struct Expr {
 pub enum ExprKind {
     Literal(LiteralKind),
     Path(Vec<Name>),
+    TypeMember {
+        owner: TypeId,
+        name: Name,
+    },
     Group(ExprId),
     Block(Block),
     Unary {

@@ -43,6 +43,7 @@ const BINARY_FILES: [(&str, &str); 2] = [
 
 pub(super) struct Sdk {
     pub root: PathBuf,
+    pub identities: BTreeMap<String, String>,
 }
 impl Sdk {
     pub fn load(options: &Options) -> Result<Self, Error> {
@@ -54,7 +55,16 @@ impl Sdk {
         Self::at(&root)
     }
     fn at(root: &Path) -> Result<Self, Error> {
-        let root=root.canonicalize().map_err(|error|failure("E-LLAM-SDK",format!("{}: {error}; prepare the pinned SDK with `cavoite sdk --llam-source ... --llam-build ... -o ...`",root.display())))?;
+        let root = root.canonicalize().map_err(|error| {
+            failure(
+                "E-LLAM-SDK",
+                format!(
+                    "{}: {error}; prepare the pinned SDK with \
+                     `cavoite sdk --llam-source ... --llam-build ... -o ...`",
+                    root.display()
+                ),
+            )
+        })?;
         let text = read(&root.join("cavo-sdk.json"), 1024 * 1024)?;
         let text = std::str::from_utf8(&text)
             .map_err(|_| failure("E-LLAM-SDK", "SDK manifest is not UTF-8"))?;
@@ -79,7 +89,14 @@ impl Sdk {
             return Err(failure("E-LLAM-SDK", "unknown SDK manifest field"));
         }
         validate_files(&root, &files)?;
-        Ok(Self { root })
+        let identities = files
+            .into_iter()
+            .filter_map(|(path, value)| match value {
+                Json::String(value) => Some((path, value)),
+                _ => None,
+            })
+            .collect();
+        Ok(Self { root, identities })
     }
     pub fn plugin(&self) -> PathBuf {
         self.root.join("lib/llam/llam_managed_pass.so")

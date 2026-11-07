@@ -328,16 +328,19 @@ impl Builder<'_> {
         self.call_contracts(definition, &arguments, expression.span)?;
         let destination = self.local(expression.ty, LocalKind::Temporary, None, expression.span)?;
         let normal = self.new_block(expression.span, None)?;
-        self.terminate(Terminator::Call {
-            callee,
-            type_arguments: type_arguments.clone(),
-            arguments,
-            parameter_types: parameter_types.clone(),
-            destination: Place::local(destination),
-            normal,
-            panic: self.abort,
-            cancel: self.abort,
-        });
+        self.terminate_at(
+            Terminator::Call {
+                callee,
+                type_arguments: type_arguments.clone(),
+                arguments,
+                parameter_types: parameter_types.clone(),
+                destination: Place::local(destination),
+                normal,
+                panic: self.abort,
+                cancel: self.abort,
+            },
+            expression.span,
+        );
         self.current = Some(normal);
         Ok(Operand::Copy(Place::local(destination)))
     }

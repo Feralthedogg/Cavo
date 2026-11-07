@@ -365,16 +365,49 @@ fn header_removals(
         if !frames.contains(&definition) {
             continue;
         }
-        if !complete.contains(&definition) {
-            let problem = crate::diagnostic::Diagnostic::error("E-MODULE-COVERAGE",
-                "cannot export an interface with incomplete ownership or region coverage",
-                crate::source::Span { start: removed.name, end: removed.name, ..removed.span })
-                .note("the implementation must establish its signature guarantees before its body can be hidden");
+        let span = crate::source::Span {
+            start: removed.name,
+            end: removed.name,
+            ..removed.span
+        };
+        if let Some(problem) =
+            export_contract_failure(hir, definition, complete.contains(&definition), span)
+        {
             return Err(problem.render(&compilation.sources));
         }
         removals.entry(removed.span.file).or_default().push(removed);
     }
     Ok(removals)
+}
+
+fn export_contract_failure(
+    hir: &hir::Program,
+    definition: hir::DefId,
+    complete: bool,
+    span: crate::source::Span,
+) -> Option<crate::diagnostic::Diagnostic> {
+    use crate::diagnostic::Diagnostic;
+    if !complete {
+        return Some(Diagnostic::error("E-MODULE-COVERAGE",
+            "cannot export an interface with incomplete ownership or region coverage", span)
+            .note("the implementation must establish its signature guarantees before its body can be hidden"));
+    }
+    if hir
+        .modular
+        .functions
+        .get(&definition)
+        .is_none_or(|contract| !contract.explicit)
+    {
+        return Some(
+            Diagnostic::error(
+                "E-MODULE-CONTRACT",
+                "hiding a public implementation requires an explicit effect contract",
+                span,
+            )
+            .help("declare @effects(...) with the effect and memory bounds callers may rely on"),
+        );
+    }
+    None
 }
 
 fn header_candidate(

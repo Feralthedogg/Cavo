@@ -116,7 +116,30 @@ pub fn analyze(
     symbols: &Interner,
     external: &[SummaryReport],
 ) -> Result<Report, InvariantError> {
+    analyze_inner(mir, hir, symbols, external, None)
+}
+
+/// The caller owns the canonical elaborated plan for this exact MIR snapshot.
+/// An absent plan remains opaque; no user annotation can manufacture one.
+pub(crate) fn analyze_with_cleanup(
+    mir: &Program,
+    hir: &hir::Program,
+    symbols: &Interner,
+    external: &[SummaryReport],
+    cleanup: &super::drop::Program,
+) -> Result<Report, InvariantError> {
+    analyze_inner(mir, hir, symbols, external, Some(cleanup))
+}
+
+fn analyze_inner(
+    mir: &Program,
+    hir: &hir::Program,
+    symbols: &Interner,
+    external: &[SummaryReport],
+    cleanup: Option<&super::drop::Program>,
+) -> Result<Report, InvariantError> {
     let targets = Targets {
+        hir,
         declared: hir
             .modular
             .functions
@@ -136,14 +159,26 @@ pub fn analyze(
     let mut summaries = Vec::with_capacity(mir.functions.len());
     let mut calls = Vec::with_capacity(mir.functions.len());
     for body in &mir.functions {
-        let (summary, dependencies) = scan_body(body, hir, &targets)?;
+        let (mut summary, mut dependencies) = scan_body(body, hir, &targets, cleanup.is_some())?;
+        if let Some(cleanup) = cleanup {
+            scan_cleanup(
+                body.definition,
+                cleanup,
+                &targets,
+                &mut summary,
+                &mut dependencies,
+            )?;
+        }
         summaries.push(summary);
-        calls.push(dependencies);
+        calls.push(dependencies.into_iter().collect());
     }
+    mark_recursive_bodies(mir, &targets, &calls, &mut summaries);
     propagate(&calls, &mut summaries)?;
-    mark_recursive_bodies(mir, &targets, &mut summaries);
     let mut violations = check_bounds(hir, symbols, &summaries);
     violations.extend(check_cleanup_calls(mir, hir, &targets, &summaries));
+    if let Some(cleanup) = cleanup {
+        violations.extend(check_drop_bodies(cleanup, &targets, &summaries));
+    }
     Ok(Report {
         functions: summaries,
         violations,
@@ -151,7 +186,7 @@ pub fn analyze(
         not_analyzed: vec![
             "runtime/checkpoint insertion and machine-PC asynchronous preemption",
             "external boundedness and cancellation contracts absent from summary schema",
-            "heap/alias validity and generic or user Drop implementation effects",
+            "heap/alias validity and unresolved generic or opaque Drop effects",
         ],
     })
 }
@@ -169,23 +204,36 @@ fn body_indices(mir: &Program, hir: &hir::Program) -> Result<Vec<Option<usize>>,
     Ok(indices)
 }
 
-fn mark_recursive_bodies(mir: &Program, targets: &Targets<'_>, summaries: &mut [FunctionEffects]) {
+fn mark_recursive_bodies(
+    mir: &Program,
+    targets: &Targets<'_>,
+    calls: &[Vec<usize>],
+    summaries: &mut [FunctionEffects],
+) {
     // A bounded declaration is a call-site promise, never evidence that its own
     // recursive implementation terminates. Keep recursion independent of it.
     let edges: Vec<Vec<usize>> = mir
         .functions
         .iter()
-        .map(|body| {
-            body.blocks
-                .iter()
-                .filter_map(|block| match &block.terminator {
-                    Terminator::Call {
-                        callee: Operand::Function { definition, .. },
-                        ..
-                    } => targets.bodies.get(definition.0 as usize).copied().flatten(),
-                    _ => None,
-                })
-                .collect()
+        .enumerate()
+        .map(|(index, body)| {
+            // Destructor and finite dynamic-call dependencies participate too;
+            // a local drop can recurse without a direct Core Call terminator.
+            let mut edges = calls[index].clone();
+            edges.extend(
+                body.blocks
+                    .iter()
+                    .filter_map(|block| match &block.terminator {
+                        Terminator::Call {
+                            callee: Operand::Function { definition, .. },
+                            ..
+                        } => targets.bodies.get(definition.0 as usize).copied().flatten(),
+                        _ => None,
+                    }),
+            );
+            edges.sort_unstable();
+            edges.dedup();
+            edges
         })
         .collect();
     for component in graph::components(&edges) {
@@ -217,6 +265,7 @@ fn external_index(
 }
 
 struct Targets<'a> {
+    hir: &'a hir::Program,
     declared: std::collections::BTreeMap<hir::DefId, &'a crate::modular::Contract>,
     intrinsics: &'a std::collections::BTreeMap<hir::DefId, crate::contracts::Intrinsic>,
     bodies: Vec<Option<usize>>,
@@ -228,7 +277,8 @@ fn scan_body(
     body: &Body,
     hir: &hir::Program,
     targets: &Targets<'_>,
-) -> Result<(FunctionEffects, Vec<usize>), InvariantError> {
+    has_cleanup: bool,
+) -> Result<(FunctionEffects, BTreeSet<usize>), InvariantError> {
     let edges = cfg_edges(body)?;
     let reachable = reachable_blocks(body.entry, &edges)?;
     let mut summary = FunctionEffects::empty(body.definition);
@@ -273,7 +323,7 @@ fn scan_body(
                     &mut dependencies,
                 )?;
             }
-            Terminator::Drop { .. } => {
+            Terminator::Drop { .. } if !has_cleanup => {
                 summary.unknown.insert(Unknown::DropGlue);
                 summary.bounded = summary.bounded.max(Boundedness::Unknown);
             }
@@ -287,7 +337,133 @@ fn scan_body(
         summary.bounded = Boundedness::MayDiverge;
     }
     record_direct_resumes(body, &edges, &mut summary)?;
-    Ok((summary, dependencies.into_iter().collect()))
+    Ok((summary, dependencies))
+}
+
+fn scan_cleanup(
+    definition: hir::DefId,
+    cleanup: &super::drop::Program,
+    targets: &Targets<'_>,
+    summary: &mut FunctionEffects,
+    dependencies: &mut BTreeSet<usize>,
+) -> Result<(), InvariantError> {
+    use super::drop::Terminator as T;
+    let body = cleanup
+        .functions
+        .iter()
+        .find(|body| body.definition == definition)
+        .ok_or_else(|| error("effect analysis has no matching cleanup body"))?;
+    let mut pending: Vec<_> = body
+        .blocks
+        .iter()
+        .filter_map(|block| match block.terminator {
+            T::InvokeGlue { glue, .. } => Some(glue),
+            _ => None,
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if seen.len() > 200_000 {
+            return Err(error("cleanup effect graph exceeds its work budget"));
+        }
+        let glue = cleanup
+            .glue
+            .get(id.0 as usize)
+            .ok_or_else(|| error("invalid effect glue ID"))?;
+        scan_cleanup_glue(&glue.kind, &mut pending, targets, summary, dependencies)?;
+    }
+    Ok(())
+}
+
+fn scan_cleanup_glue(
+    kind: &super::drop::GlueKind,
+    pending: &mut Vec<super::drop::GlueId>,
+    targets: &Targets<'_>,
+    summary: &mut FunctionEffects,
+    dependencies: &mut BTreeSet<usize>,
+) -> Result<(), InvariantError> {
+    use super::drop::GlueKind as G;
+    match kind {
+        G::Trivial => {}
+        G::Record(fields) => pending.extend(fields.iter().map(|field| field.glue)),
+        G::Enum(variants) => pending.extend(
+            variants
+                .iter()
+                .flat_map(|variant| variant.fields.iter().copied()),
+        ),
+        G::Array { element, .. }
+        | G::SymbolicArray { element, .. }
+        | G::ArrayTail { element, .. } => pending.push(*element),
+        G::User {
+            destructor, fields, ..
+        } => {
+            scan_destructor(destructor.definition, targets, summary, dependencies)?;
+            pending.push(*fields);
+        }
+        G::Destructor { destructor, .. } => {
+            scan_destructor(destructor.definition, targets, summary, dependencies)?
+        }
+        G::TaskHandle | G::Parameter { .. } | G::Manual => {
+            summary.unknown.insert(Unknown::DropGlue);
+            summary.bounded = summary.bounded.max(Boundedness::Unknown);
+        }
+    }
+    Ok(())
+}
+
+fn scan_destructor(
+    definition: hir::DefId,
+    targets: &Targets<'_>,
+    summary: &mut FunctionEffects,
+    dependencies: &mut BTreeSet<usize>,
+) -> Result<(), InvariantError> {
+    scan_call(
+        &Operand::Function {
+            definition,
+            ty: targets.hir.definitions[definition].ty,
+        },
+        targets,
+        summary,
+        dependencies,
+    )
+}
+
+fn check_drop_bodies(
+    cleanup: &super::drop::Program,
+    targets: &Targets<'_>,
+    summaries: &[FunctionEffects],
+) -> Vec<EffectViolation> {
+    use super::drop::GlueKind;
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+    for glue in &cleanup.glue {
+        let definition = match &glue.kind {
+            GlueKind::User { destructor, .. } | GlueKind::Destructor { destructor, .. } => {
+                destructor.definition
+            }
+            _ => continue,
+        };
+        if !seen.insert(definition) {
+            continue;
+        }
+        let summary = targets
+            .bodies
+            .get(definition.0 as usize)
+            .copied()
+            .flatten()
+            .and_then(|index| summaries.get(index));
+        if summary.is_none_or(|summary| !summary.cleanup_safe()) {
+            failures.push(EffectViolation {
+                definition,
+                span: targets.hir.definitions[definition].span,
+                message: "transformed destructor must retain bounded nosuspend, nocancel, nopanic and noalloc effects".into(),
+            });
+        }
+    }
+    failures
 }
 
 fn scan_call(

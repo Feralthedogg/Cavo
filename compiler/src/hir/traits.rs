@@ -109,10 +109,28 @@ pub struct TraitMethod {
 
 #[derive(Clone, Debug)]
 pub struct Impl {
+    pub negative: bool,
     pub definition: DefId,
     pub target: TyId,
     pub trait_ref: Option<TraitRef>,
     pub methods: Vec<ImplMethod>,
+}
+
+/// Restrictions are consulted before positive selection. They cannot become
+/// witnesses or acquire trust, and therefore need no recursive trait matching.
+pub(crate) fn negative_roles(
+    program: &super::Program,
+    nominal: DefId,
+) -> impl Iterator<Item = LanguageItem> + '_ {
+    program.implementations.iter().filter_map(move |item| {
+        if !item.negative
+            || !matches!(program.types.get(item.target), crate::types::Ty::Named { definition, .. } if *definition == nominal)
+        {
+            return None;
+        }
+        let reference = item.trait_ref.as_ref()?;
+        program.traits.iter().find(|trait_| trait_.definition == reference.definition)?.language_item
+    })
 }
 
 #[derive(Clone, Debug)]

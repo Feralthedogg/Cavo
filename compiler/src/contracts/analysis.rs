@@ -65,6 +65,7 @@ fn memory_findings(
     let properties = Properties::compute(hir);
     let dependencies = super::trust_dependencies(mir, hir, external, &properties)?;
     let layouts = memory_layouts(mir, hir, symbols, sources);
+    let call_names = source_call_names(hir, sources);
     let mut report = Report::default();
     for body in &mir.functions {
         let liveness = crate::mir::borrow::live::Liveness::compute(body, &properties)
@@ -88,12 +89,41 @@ fn memory_findings(
             events: &events,
             liveness: &liveness,
             dependencies: &dependencies,
+            call_names: &call_names,
         };
         let inputs = solve(&context)?;
         collect(&context, &inputs, &mut report)?;
     }
     report.dependencies = dependencies;
     Ok(report)
+}
+
+fn source_call_names<'a>(hir: &hir::Program, sources: &'a SourceMap) -> HashMap<Span, &'a str> {
+    let mut names = HashMap::new();
+    for function in &hir.functions {
+        for expression in &function.expressions {
+            let hir::ExprKind::Call { callee, .. } = expression.kind else {
+                continue;
+            };
+            let span = function.expressions[callee].span;
+            if let Some(name) = sources
+                .files()
+                .get(span.file.0 as usize)
+                .and_then(|file| file.text().get(span.start as usize..span.end as usize))
+                .filter(|name| {
+                    // Copy only a written identifier path into the title.
+                    // Groups/comments use the declaration name as a safe fallback.
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+                })
+            {
+                names.insert(expression.span, name);
+            }
+        }
+    }
+    names
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +133,7 @@ struct Size {
 }
 
 struct Context<'a> {
+    call_names: &'a HashMap<Span, &'a str>,
     dependencies: &'a std::collections::BTreeMap<hir::DefId, BTreeSet<Trust>>,
     liveness: &'a crate::mir::borrow::live::Liveness,
     body: &'a Body,

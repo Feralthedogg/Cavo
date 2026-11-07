@@ -1,0 +1,7 @@
+trait Marker {}
+struct Packet { i32 value; }
+
+i32 inspect(Packet packet) {
+    Packet owner = move packet;
+    return packet.value;
+}

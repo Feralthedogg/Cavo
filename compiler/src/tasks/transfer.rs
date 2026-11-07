@@ -15,6 +15,14 @@ pub enum Property {
 }
 
 impl Property {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Send => "Send",
+            Self::Sync => "Sync",
+            Self::TaskTransfer => "TaskTransfer",
+            Self::SuspendSafe => "SuspendSafe",
+        }
+    }
     pub(crate) fn from_role(role: LanguageItem) -> Option<Self> {
         Some(match role {
             LanguageItem::Send => Self::Send,
@@ -200,6 +208,8 @@ impl Checker<'_> {
             .forbidden
             .get(&definition)
             .is_some_and(|items| items.contains(&property))
+            || hir::traits::negative_roles(self.program, definition)
+                .any(|role| role == property.role())
         {
             return Err(Failure::new(
                 FailureKind::Identity,

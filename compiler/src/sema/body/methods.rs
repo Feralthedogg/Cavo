@@ -13,28 +13,24 @@ impl Body<'_, '_> {
         expected: Option<TyId>,
         span: Span,
     ) -> Option<ExprId> {
-        let A::Path(path) = &self.context.ast.expr(callee).kind else {
-            return None;
-        };
-        if path.len() < 2 || self.find_local(path[0].symbol).is_some() {
-            return None;
-        }
-        let (name, prefix) = path.split_last()?;
-        let mut target = self.associated_type(prefix)?;
+        let (mut target, name, explicit_owner) = self.associated_target(callee)?;
         if let Ty::Named { definition, .. } = self.type_kind(target)
-            && self
-                .context
-                .variants
-                .contains_key(&(*definition, name.symbol))
+            && let Some(&variant) = self.context.variants.get(&(*definition, name.symbol))
         {
-            return None;
+            return if explicit_owner {
+                Some(self.typed_variant_call(variant, target, explicit, arguments, expected, span))
+            } else {
+                None
+            };
         }
-        if let (Ty::Named { definition, .. }, Some(expected)) = (self.type_kind(target), expected)
+        if !explicit_owner
+            && let (Ty::Named { definition, .. }, Some(expected)) =
+                (self.type_kind(target), expected)
             && matches!(self.type_kind(expected), Ty::Named { definition: found, .. } if found == definition)
         {
             target = expected;
         }
-        let selection = self.select_method(target, *name)?;
+        let selection = self.select_method(target, name)?;
         if self.context.is_drop_method(selection.definition) {
             self.context.error(
                 "E-DROP-EXPLICIT",
@@ -44,35 +40,108 @@ impl Body<'_, '_> {
             return Some(self.add_expr(H::Error, TyId::ERROR, span));
         }
         let mut seeds = selection.type_arguments;
-        if let Ty::Named { definition, .. } = self.type_kind(target)
+        if !explicit_owner
+            && matches!(&self.context.ast.expr(callee).kind,
+                A::Path(path) if path.len() == 2 && !self.generic_types.contains_key(&path[0].symbol))
+            && let Ty::Named { definition, .. } = self.type_kind(target)
             && self.context.definition(*definition).ty == target
-            && prefix.len() == 1
-            && !self.generic_types.contains_key(&prefix[0].symbol)
         {
             seeds.clear();
         } // Infer the nominal's arguments from values/result.
+        let target = self.associated_method_target(selection.definition, seeds, span);
+        Some(self.call_resolved(target, explicit, arguments, expected, span))
+    }
+
+    fn associated_method_target(
+        &mut self,
+        definition: DefId,
+        seeds: Vec<GenericArg>,
+        span: Span,
+    ) -> ResolvedCall {
         let ty = self
             .context
             .program
             .types
-            .generalize_callable(
-                self.context.definition(selection.definition).ty,
-                selection.definition,
-            )
+            .generalize_callable(self.context.definition(definition).ty, definition)
             .unwrap_or(TyId::ERROR);
-        let callee = self.add_expr(H::Definition(selection.definition), ty, span);
-        Some(self.call_resolved(
+        let callee = self.add_expr(H::Definition(definition), ty, span);
+        ResolvedCall {
+            callee,
+            leading_arguments: Vec::new(),
+            generic_arguments: seeds,
+            prelude: Vec::new(),
+        }
+    }
+
+    fn associated_target(&mut self, callee: ast::ExprId) -> Option<(TyId, ast::Name, bool)> {
+        match &self.context.ast.expr(callee).kind {
+            A::TypeMember { owner, name } => Some((self.resolve_type(*owner), *name, true)),
+            A::Path(path) if path.len() >= 2 && self.find_local(path[0].symbol).is_none() => {
+                let (name, prefix) = path.split_last()?;
+                Some((self.associated_type(prefix)?, *name, false))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn type_member_value(
+        &mut self,
+        owner: ast::TypeId,
+        name: ast::Name,
+        span: Span,
+    ) -> (H, TyId) {
+        let target = self.resolve_type(owner);
+        if let Ty::Named { definition, .. } = self.type_kind(target)
+            && let Some(&variant) = self.context.variants.get(&(*definition, name.symbol))
+            && !matches!(
+                self.context
+                    .program
+                    .types
+                    .get(self.context.definition(variant).ty),
+                Ty::Function { .. }
+            )
+        {
+            return (H::Definition(variant), target);
+        }
+        self.context.error(
+            "E-TYPE-CONSTRUCTOR",
+            "invoke the generic type's associated function with `(...)`",
+            span,
+        );
+        (H::Error, TyId::ERROR)
+    }
+
+    fn typed_variant_call(
+        &mut self,
+        variant: DefId,
+        target: TyId,
+        explicit: &[ast::GenericArg],
+        arguments: &[ast::ExprId],
+        expected: Option<TyId>,
+        span: Span,
+    ) -> ExprId {
+        let Ty::Named {
+            arguments: owner_arguments,
+            ..
+        } = self.type_kind(target)
+        else {
+            unreachable!("resolved enum owner");
+        };
+        let generic_arguments = owner_arguments.clone();
+        let ty = self.context.definition(variant).ty;
+        let callee = self.add_expr(H::Definition(variant), ty, span);
+        self.call_resolved(
             ResolvedCall {
                 callee,
                 leading_arguments: Vec::new(),
-                generic_arguments: seeds,
+                generic_arguments,
                 prelude: Vec::new(),
             },
             explicit,
             arguments,
             expected,
             span,
-        ))
+        )
     }
 
     fn associated_type(&mut self, path: &[ast::Name]) -> Option<TyId> {

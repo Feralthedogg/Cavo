@@ -86,9 +86,10 @@ impl Report {
                 format!("{message} for `{}`", obligation.operation),
                 obligation.span,
             );
-            diagnostic
-                .notes
-                .push(format!("analysis coverage: {:?}", obligation.coverage()));
+            diagnostic.notes.push(format!(
+                "analysis coverage: {}",
+                coverage_text(obligation.coverage())
+            ));
             for component in &obligation.components {
                 diagnostic.notes.push(format!(
                     "{}: {}",
@@ -107,7 +108,9 @@ impl Report {
 
     fn evidence_notes(&self, assessment: &Assessment, diagnostic: &mut Diagnostic) {
         let id = match assessment {
-            Assessment::Proven(id) | Assessment::Assumed(id) => *id,
+            // Established components are already listed in notes. Their routine
+            // origin is not a cause of this failure and should not mark parameters.
+            Assessment::Assumed(id) => *id,
             Assessment::Violated(WitnessId(id)) => *id,
             _ => return,
         };
@@ -147,6 +150,14 @@ impl Report {
             }
         }
         output
+    }
+}
+
+fn coverage_text(coverage: Coverage) -> &'static str {
+    match coverage {
+        Coverage::Complete => "complete",
+        Coverage::Partial => "partial",
+        Coverage::Unavailable => "unavailable",
     }
 }
 

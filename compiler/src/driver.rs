@@ -7,18 +7,29 @@ use std::{
 };
 
 mod modules;
+mod native;
 mod options;
+mod outputs;
 
-const HELP: &str = r#"Cavo frontend
+const HELP: &str = r#"Cavo compiler
 
 Usage: cavoite [check|parse|lex] [--emit=ast|hir|mir|mono|local|tokens|interface|contracts|module] FILE...
        cavoite check --manifest-path Cavo.toml [--locked] [--offline]
        cavoite lock --manifest-path Cavo.toml [--offline]
        cavoite summary-id FILE
+       cavoite build|run [--release|-O0|-O2] [--llvm-bin DIR] [--llam-sdk DIR] [-o FILE] FILE...
+       cavoite build [--emit=llvm-ir|obj] [--runtime=llam|none] FILE...
+       cavoite doctor [--llvm-bin DIR] [--llam-sdk DIR] [--no-probe]
+       cavoite sdk --llam-source DIR --llam-build DIR [-o PREFIX]
+       cavoite clean [--manifest-path Cavo.toml]
 
 check  Check types, ownership, regions, contracts, effects and scoped tasks (default).
 parse  Parse the language grammar and dump AST.
 lex    Dump tokens with original UTF-8 byte spans.
+build  Emit native code using pinned LLVM 23.1.2 and LLAM 3.0.0.
+run    Build and run; propagate the program's exit status.
+doctor Check tools, SDK identities and required asynchronous runtime admission.
+clean  Remove only unchanged native outputs confirmed by ownership records.
 
 --summary FILE          Load a versioned external summary without trusting it.
 --trust-summary DIGEST  Pin a reviewed document's sha256 identity as an assumption.
@@ -32,9 +43,13 @@ lex    Dump tokens with original UTF-8 byte spans.
 --manifest-path FILE    Resolve the package's declared sources and pinned dependencies.
 --locked                Require an exact Cavo.lock match.
 --offline               Use local sources and already cached pinned Git dependencies.
+--grammar               Print the frozen Cavo 0.1 EBNF.
 
-This frontend does not generate native code or execute LLAM tasks. Unestablished
-safety obligations are rejected; native code and runtime verification is pending.
+Native outputs use target/cavo/<triple>/<debug|release>/. Temporary IR is removed
+unless --emit=llvm-ir is requested. The default runtime policy is async-required;
+--runtime=none selects explicit native diagnostics mode. Check/parse/lex need no
+LLVM or runtime. Scoped tasks require the unavailable cancellation-immune drain
+and are rejected by native emission until that runtime contract is implemented.
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +59,19 @@ enum Mode {
     Lex,
     SummaryId,
     Lock,
+    Build,
+    Run,
+    Doctor,
+    Clean,
+    Sdk,
+}
+impl Mode {
+    fn native(self) -> bool {
+        matches!(self, Self::Build | Self::Run)
+    }
+    fn tool(self) -> bool {
+        matches!(self, Self::Doctor | Self::Clean | Self::Sdk)
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Emit {
@@ -57,6 +85,8 @@ enum Emit {
     Interface,
     Module,
     Contracts,
+    LlvmIr,
+    Object,
 }
 
 pub fn main_entry() -> ExitCode {
@@ -91,10 +121,14 @@ fn run_inner(
             return Ok(0);
         }
         Ok(options::Action::Version) => {
-            writeln!(output, "cavoite {} (frontend)", env!("CARGO_PKG_VERSION"))?;
+            writeln!(output, "cavoite {}", env!("CARGO_PKG_VERSION"))?;
             return Ok(0);
         }
-        Ok(options::Action::Run(options)) => options,
+        Ok(options::Action::Grammar) => {
+            output.write_all(crate::syntax::GRAMMAR.as_bytes())?;
+            return Ok(0);
+        }
+        Ok(options::Action::Run(options)) => *options,
         Err(options::Error::Usage) => {
             error.write_all(HELP.as_bytes())?;
             return Ok(2);
@@ -112,6 +146,9 @@ fn execute(
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<u8> {
+    if options.mode.tool() {
+        return native::tool(&options, output, error);
+    }
     if options.mode == Mode::SummaryId {
         let text = read_summary(&options.paths[0])?;
         writeln!(output, "{}", crate::external::Summaries::digest(&text))?;
@@ -143,34 +180,43 @@ fn execute(
     }
     let mode = options.mode;
     let emit = options.emit;
-    let Some((mut compilation, count)) = load_inputs(options, package.as_ref(), output, error)?
+    let Some((mut compilation, count)) = load_inputs(&options, package.as_ref(), output, error)?
     else {
         return Ok(2);
     };
+    if mode.native() {
+        return native::compile(&mut compilation, &options, package.as_ref(), output, error);
+    }
     compile_output(&mut compilation, mode, emit, count, output, error)
 }
 
 fn load_inputs(
-    options: options::Options,
+    options: &options::Options,
     package: Option<&crate::packages::Graph>,
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<Option<(Compilation, usize)>> {
     let mut compilation = Compilation::default();
-    if !modules::load(&mut compilation, options.modules, error)? {
+    if !modules::load(&mut compilation, &options.modules, error)? {
         return Ok(None);
     }
-    for path in options.summary_paths {
-        let text = read_summary(&path)?;
-        compilation.add_external_summary(&path, text);
+    for path in &options.summary_paths {
+        let text = read_summary(path)?;
+        compilation.add_external_summary(path, text);
     }
-    for digest in options.trusted {
+    for &digest in &options.trusted {
         compilation.trust_summary(digest);
     }
     let files = if let Some(package) = package {
         modules::load_package(&mut compilation, package, error)?
     } else {
-        load_sources(&mut compilation, options.paths, options.mode, output, error)?
+        load_sources(
+            &mut compilation,
+            &options.paths,
+            options.mode,
+            output,
+            error,
+        )?
     };
     Ok(files.map(|count| (compilation, count)))
 }
@@ -292,32 +338,7 @@ fn emit_success(
     match mode {
         Mode::Check => {
             if emit == Emit::Interface {
-                let program = program.expect("typed HIR");
-                let Some(interface) = crate::external::interface::interfaces(
-                    program,
-                    &compilation.symbols,
-                    &compilation.sources,
-                ) else {
-                    writeln!(
-                        error,
-                        "cavoite: interface fingerprint exceeds its resource limit"
-                    )?;
-                    return Ok(1);
-                };
-                let Some(copy) = crate::external::interface::copy_permissions(
-                    program,
-                    &compilation.symbols,
-                    &compilation.sources,
-                ) else {
-                    writeln!(
-                        error,
-                        "cavoite: Copy interface identities exceed their resource limit"
-                    )?;
-                    return Ok(1);
-                };
-                output.write_all(
-                    crate::external::interface::render_with_copy(&interface, &copy).as_bytes(),
-                )?;
+                return emit_interface(compilation, program.expect("typed HIR"), output, error);
             } else if emit == Emit::Hir {
                 writeln!(
                     output,
@@ -342,28 +363,64 @@ fn emit_success(
             symbols(compilation, output)?;
         }
         Mode::Lex => {}
-        Mode::SummaryId | Mode::Lock => unreachable!("handled before parsing"),
+        Mode::SummaryId
+        | Mode::Lock
+        | Mode::Build
+        | Mode::Run
+        | Mode::Doctor
+        | Mode::Clean
+        | Mode::Sdk => unreachable!("handled before frontend output"),
     }
+    Ok(0)
+}
+
+fn emit_interface(
+    compilation: &Compilation,
+    program: &crate::hir::Program,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<u8> {
+    let Some(interface) =
+        crate::external::interface::interfaces(program, &compilation.symbols, &compilation.sources)
+    else {
+        writeln!(
+            error,
+            "cavoite: interface fingerprint exceeds its resource limit"
+        )?;
+        return Ok(1);
+    };
+    let Some(copy) = crate::external::interface::copy_permissions(
+        program,
+        &compilation.symbols,
+        &compilation.sources,
+    ) else {
+        writeln!(
+            error,
+            "cavoite: Copy interface identities exceed their resource limit"
+        )?;
+        return Ok(1);
+    };
+    output.write_all(crate::external::interface::render_with_copy(&interface, &copy).as_bytes())?;
     Ok(0)
 }
 
 fn load_sources(
     compilation: &mut Compilation,
-    paths: Vec<PathBuf>,
+    paths: &[PathBuf],
     mode: Mode,
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<Option<usize>> {
     let mut count = 0;
     for path in paths {
-        let text = match std::fs::read_to_string(&path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(problem) => {
                 writeln!(error, "cavoite: {}: {problem}", path.display())?;
                 return Ok(None);
             }
         };
-        let file = match compilation.sources.add(&path, text) {
+        let file = match compilation.sources.add(path, text) {
             Ok(file) => file,
             Err(problem) => {
                 writeln!(error, "cavoite: {}: {problem}", path.display())?;

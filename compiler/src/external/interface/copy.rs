@@ -6,6 +6,7 @@ pub struct CopyPermission {
     pub name: String,
     /// These are declarations, not an assertion that every instantiation is Copy.
     pub explicit_impls: Vec<Digest>,
+    pub negative_traits: Vec<&'static str>,
 }
 
 pub fn permissions(
@@ -35,6 +36,7 @@ pub fn permissions(
             permissions.push(CopyPermission {
                 name: qualified(program, symbols, id),
                 explicit_impls,
+                negative_traits: negative_markers(program, id),
             });
         }
     }

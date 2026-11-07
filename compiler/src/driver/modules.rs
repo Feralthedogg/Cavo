@@ -6,11 +6,11 @@ use std::{
 
 pub(super) fn load(
     compilation: &mut Compilation,
-    paths: Vec<PathBuf>,
+    paths: &[PathBuf],
     error: &mut dyn Write,
 ) -> io::Result<bool> {
     for path in paths {
-        let result = read(&path)
+        let result = read(path)
             .and_then(|text| Module::decode(&text))
             .and_then(|module| module.load_into(compilation));
         if let Err(message) = result {

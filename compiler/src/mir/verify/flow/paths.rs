@@ -144,6 +144,37 @@ impl Paths {
             .iter()
             .all(|init| *init == Init::Yes)
     }
+    pub fn moved_at(&self, node: usize, state: &State) -> Option<MoveCause> {
+        state.moves[self.nodes[node].leaves.clone()]
+            .iter()
+            .flatten()
+            .copied()
+            // One definitely moved field makes the whole value unavailable.
+            // Prefer its witness over a merely possible move of another field.
+            .min_by_key(|cause| {
+                (
+                    cause.certainty != MoveCertainty::Definite,
+                    span_key(cause.span),
+                )
+            })
+    }
+    pub fn tag_move(&self, node: usize, state: &State) -> Option<MoveCause> {
+        state.moves[self.nodes[node].tag?]
+    }
+    pub fn moved(&self, access: &Access, state: &mut State, span: Span) {
+        if let Some(node) = access.node {
+            for cause in &mut state.moves[self.nodes[node].leaves.clone()] {
+                *cause = Some(MoveCause {
+                    span,
+                    certainty: if access.indexed {
+                        MoveCertainty::Possible
+                    } else {
+                        MoveCertainty::Definite
+                    },
+                });
+            }
+        }
+    }
     pub fn may_live(&self, node: usize, state: &State) -> bool {
         state.init[self.nodes[node].leaves.clone()]
             .iter()
@@ -151,7 +182,8 @@ impl Paths {
     }
     pub fn set(&self, access: &Access, state: &mut State, init: Init) {
         if let Some(node) = access.node {
-            for current in &mut state.init[self.nodes[node].leaves.clone()] {
+            for index in self.nodes[node].leaves.clone() {
+                let current = &mut state.init[index];
                 *current = if access.indexed {
                     match (*current, init) {
                         (Init::Yes, Init::Yes) => Init::Yes,
@@ -161,6 +193,11 @@ impl Paths {
                 } else {
                     init
                 };
+                // A weak indexed write cannot restore another element's value
+                // or erase its move witness. A strong initialization can.
+                if !access.indexed || *current == Init::Yes {
+                    state.moves[index] = None;
+                }
             }
         }
     }

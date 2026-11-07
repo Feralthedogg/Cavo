@@ -7,6 +7,7 @@ pub(super) fn build(
     artifact: codegen::Artifact,
     kind: OutputKind,
     output: &Path,
+    optimization: Optimization,
 ) -> Result<(), Error> {
     if std::fs::symlink_metadata(output)
         .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
@@ -30,9 +31,9 @@ pub(super) fn build(
     let scratch = scratch::Scratch::new(&parent)?;
     let input = scratch.write("program.ll", &artifact.llvm_ir)?;
     let optimized = scratch.file("optimized.ll");
-    optimize(tools, sdk, &input, &optimized)?;
+    optimize(tools, sdk, &input, &optimized, optimization)?;
     let object = scratch.file("program.o");
-    object_file(tools, sdk, &scratch, &optimized, &object)?;
+    object_file(tools, sdk, &scratch, &optimized, &object, optimization)?;
     let result = if kind == OutputKind::Object {
         object
     } else {
@@ -63,20 +64,40 @@ fn optimize(
     sdk: Option<&sdk::Sdk>,
     input: &Path,
     output: &Path,
+    optimization: Optimization,
 ) -> Result<(), Error> {
-    let mut args = Vec::new();
-    if let Some(sdk) = sdk {
-        args.push(format!("-load-pass-plugin={}", sdk.plugin().display()).into());
-    }
-    // The plugin installs itself at OptimizerLast. Adding its named pass too
-    // would lower an already-qualified module twice and invalidate its ABI.
-    args.extend(["-passes=default<O2>,verify", "-S"].map(OsString::from));
-    args.extend([
+    let optimized = if sdk.is_some() {
+        output.with_extension("pre.ll")
+    } else {
+        output.into()
+    };
+    let args = vec![
+        format!("-passes=verify,default<{}>,verify", optimization.llvm()).into(),
+        "-S".into(),
         input.as_os_str().into(),
         "-o".into(),
-        output.as_os_str().into(),
-    ]);
-    tools.invoke("opt", args, sdk.is_some())?;
+        optimized.as_os_str().into(),
+    ];
+    tools.invoke("opt", args, false)?;
+    if let Some(sdk) = sdk {
+        // Loading the plugin only for its named pass avoids the automatic
+        // OptimizerLast hook and qualifies the module exactly once at O0/O2.
+        tools.invoke(
+            "opt",
+            vec![
+                format!("-load-pass-plugin={}", sdk.plugin().display()).into(),
+                // Normalize unreachable guard-leave tails produced for fatal
+                // foreign calls. O0 codegen otherwise retains those tails and
+                // violates the SDK's noreturn-boundary certificate shape.
+                "-passes=llam-managed,simplifycfg,verify".into(),
+                "-S".into(),
+                optimized.into_os_string(),
+                "-o".into(),
+                output.as_os_str().into(),
+            ],
+            true,
+        )?;
+    }
     Ok(())
 }
 
@@ -86,52 +107,64 @@ fn object_file(
     scratch: &scratch::Scratch,
     input: &Path,
     output: &Path,
+    optimization: Optimization,
 ) -> Result<(), Error> {
-    let common = ["--enable-new-pm=0", "-relocation-model=pic"];
     if let Some(sdk) = sdk {
         let machine = scratch.file("program.mir");
         let labelled = scratch.file("labelled.mir");
-        let mut args = common.map(OsString::from).to_vec();
+        let mut args = machine_arguments(input, &machine);
         args.extend([
-            "-O2".into(),
+            format!("-{}", optimization.llvm()).into(),
             "-stop-after=unpack-mi-bundles".into(),
-            input.as_os_str().into(),
-            "-o".into(),
-            machine.as_os_str().into(),
         ]);
         tools.invoke("llc", args, true)?;
-        let mut args = common.map(OsString::from).to_vec();
+        let mut args = machine_arguments(&machine, &labelled);
         args.extend([
             format!("-load={}", sdk.plugin().display()).into(),
+            format!("-{}", optimization.llvm()).into(),
             "-run-pass=llam-managed-machine".into(),
             "-verify-machineinstrs".into(),
-            machine.into_os_string(),
-            "-o".into(),
-            labelled.as_os_str().into(),
         ]);
         tools.invoke("llc", args, true)?;
-        let mut args = common.map(OsString::from).to_vec();
+        let mut args = machine_arguments(&labelled, output);
         args.extend([
             "-start-after=unpack-mi-bundles".into(),
+            format!("-{}", optimization.llvm()).into(),
             "-verify-machineinstrs".into(),
             "-filetype=obj".into(),
-            labelled.into_os_string(),
-            "-o".into(),
-            output.as_os_str().into(),
         ]);
         tools.invoke("llc", args, true)?;
     } else {
-        let mut args = common.map(OsString::from).to_vec();
+        let mut args = machine_arguments(input, output);
         args.extend([
-            "-O2".into(),
+            format!("-{}", optimization.llvm()).into(),
             "-filetype=obj".into(),
-            input.as_os_str().into(),
-            "-o".into(),
-            output.as_os_str().into(),
         ]);
         tools.invoke("llc", args, false)?;
     }
     Ok(())
+}
+
+fn machine_arguments(input: &Path, output: &Path) -> Vec<OsString> {
+    // The SDK proves register provenance for immutable guard bindings, not
+    // arbitrary spill memory. Keep its selector/allocator profile explicit
+    // while retaining the selected O0/O2 IR and machine optimization levels.
+    let mut arguments = [
+        "--enable-new-pm=0",
+        "-relocation-model=pic",
+        "-fast-isel=false",
+        "-global-isel=false",
+        "-optimize-regalloc=true",
+        "-regalloc=greedy",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    arguments.extend([
+        input.as_os_str().into(),
+        "-o".into(),
+        output.as_os_str().into(),
+    ]);
+    arguments
 }
 
 fn link(
@@ -194,31 +227,10 @@ fn platform_link_flags(target: &str) -> Vec<OsString> {
 }
 
 fn verify(tools: &Tools, sdk: &sdk::Sdk, image: &Path) -> Result<(), Error> {
-    let args = vec![
-        sdk.verifier().into_os_string(),
-        image.as_os_str().into(),
-        "--objdump".into(),
-        tools.path("llvm-objdump").into_os_string(),
-    ];
-    let mut seal = args.clone();
+    let mut seal = verifier_arguments(tools, sdk, image);
     seal.push("--seal".into());
     let report = tools::run(Path::new("python3"), seal, false)?;
-    let crate::external::json::Json::Object(report) =
-        crate::external::json::parse_bounded(&report, 1024 * 1024, 128)
-            .map_err(|error| failure("E-LLAM-VERIFY", error))?
-    else {
-        return Err(failure(
-            "E-LLAM-VERIFY",
-            "invalid final-image verification report",
-        ));
-    };
-    if !matches!(report.get("managed_entries"),Some(crate::external::json::Json::Number(count)) if *count>0)
-    {
-        return Err(failure(
-            "E-LLAM-VERIFY",
-            "the final image contains no admitted managed entries",
-        ));
-    }
+    managed_entry_count(&report)?;
     if tools.target.contains("apple") {
         tools::run(
             Path::new("/usr/bin/codesign"),
@@ -231,6 +243,50 @@ fn verify(tools: &Tools, sdk: &sdk::Sdk, image: &Path) -> Result<(), Error> {
             false,
         )?;
     }
-    tools::run(Path::new("python3"), args, false)?;
+    check_image(tools, sdk, image)?;
     Ok(())
+}
+
+fn verifier_arguments(tools: &Tools, sdk: &sdk::Sdk, image: &Path) -> Vec<OsString> {
+    vec![
+        sdk.verifier().into_os_string(),
+        image.as_os_str().into(),
+        "--objdump".into(),
+        tools.path("llvm-objdump").into_os_string(),
+    ]
+}
+
+pub(super) fn check_image(tools: &Tools, sdk: &sdk::Sdk, image: &Path) -> Result<u64, Error> {
+    let report = tools::run(
+        Path::new("python3"),
+        verifier_arguments(tools, sdk, image),
+        false,
+    )
+    .map_err(|error| failure("E-LLAM-VERIFY", error.message))?;
+    managed_entry_count(&report)
+}
+
+fn managed_entry_count(report: &str) -> Result<u64, Error> {
+    let crate::external::json::Json::Object(report) =
+        crate::external::json::parse_bounded(report, 1024 * 1024, 128)
+            .map_err(|error| failure("E-LLAM-VERIFY", error))?
+    else {
+        return Err(failure(
+            "E-LLAM-VERIFY",
+            "invalid final-image verification report",
+        ));
+    };
+    let count = report
+        .get("managed_entries")
+        .and_then(|count| match count {
+            crate::external::json::Json::Number(count) => Some(*count),
+            _ => None,
+        })
+        .filter(|&count| count > 0);
+    count.ok_or_else(|| {
+        failure(
+            "E-LLAM-VERIFY",
+            "the final image contains no admitted managed entries",
+        )
+    })
 }

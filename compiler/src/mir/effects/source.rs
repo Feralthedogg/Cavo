@@ -201,6 +201,7 @@ enum Mode {
 enum Work {
     Statement(hir::StmtId),
     Expression(hir::ExprId),
+    Place(hir::ExprId),
 }
 
 struct Scan {
@@ -216,6 +217,7 @@ struct Walker<'a> {
     pending: Vec<Work>,
     seen_statements: Vec<bool>,
     seen_expressions: Vec<bool>,
+    seen_places: Vec<bool>,
     facts: &'a Properties,
     scan: Scan,
 }
@@ -253,6 +255,7 @@ impl<'a> Walker<'a> {
                 .collect(),
             seen_statements: vec![false; function.statements.len()],
             seen_expressions: vec![false; function.expressions.len()],
+            seen_places: vec![false; function.expressions.len()],
             scan: Scan {
                 calls: BTreeSet::new(),
                 cyclic: false,
@@ -275,6 +278,7 @@ impl<'a> Walker<'a> {
             let outcome = match work {
                 Work::Statement(id) => self.statement(id),
                 Work::Expression(id) => self.expression(id),
+                Work::Place(id) => self.place(id),
             };
             if let Err(error) = outcome {
                 self.scan.problem = Some(error);
@@ -306,7 +310,7 @@ impl<'a> Walker<'a> {
             }
             S::Expression(value) => self.expression_work(*value),
             S::Assign { target, value, .. } => {
-                self.expression_work(*target);
+                self.pending.push(Work::Place(*target));
                 self.expression_work(*value);
             }
             S::Return(value) if self.mode == Mode::Function => {
@@ -351,33 +355,43 @@ impl<'a> Walker<'a> {
         }
         let expression = &self.function.expressions[id];
         self.check_drop_type(expression.ty, expression.span)?;
-        match &expression.kind {
+        self.expression_effects(&expression.kind, expression.span)
+    }
+
+    fn expression_effects(&mut self, kind: &H, span: Span) -> Result<(), CleanupError> {
+        match kind {
             H::Spawn { .. } => {
                 return Err(problem(
-                    expression.span,
+                    span,
                     "task admission cannot execute in bounded cleanup",
                 ));
             }
             H::Call {
                 callee, arguments, ..
             } => {
-                self.call(*callee, expression.span)?;
+                self.call(*callee, span)?;
                 self.pending
                     .extend(arguments.iter().copied().map(Work::Expression));
+            }
+            H::Unary {
+                op: crate::syntax::ast::UnaryOp::Borrow | crate::syntax::ast::UnaryOp::BorrowMut,
+                operand,
+            } => {
+                self.pending.push(Work::Place(*operand));
             }
             H::Unary { operand, .. } | H::Group(operand) | H::CoerceArrayToSlice(operand) => {
                 self.expression_work(*operand)
             }
-            H::Binary { left, right, .. }
-            | H::Index {
-                base: left,
-                index: right,
-            } => {
+            H::Binary { left, right, .. } => {
                 self.expression_work(*left);
                 self.expression_work(*right);
             }
+            H::Index { base, index } => {
+                self.pending.push(Work::Place(*base));
+                self.expression_work(*index);
+            }
             H::Field { base, .. } | H::VariantField { base, .. } | H::IsVariant { base, .. } => {
-                self.expression_work(*base)
+                self.pending.push(Work::Place(*base));
             }
             H::Array(values) => self
                 .pending
@@ -388,20 +402,44 @@ impl<'a> Walker<'a> {
             H::Record { fields, .. } => self
                 .pending
                 .extend(fields.iter().map(|(_, value)| Work::Expression(*value))),
-            H::Match { .. } | H::BlockValue { .. } => self.control_expression(&expression.kind),
+            H::Match { .. } | H::BlockValue { .. } => self.control_expression(kind),
             H::DynCall { .. } => {
                 return Err(problem(
-                    expression.span,
+                    span,
                     "source cleanup requires an established dynamic dispatch witness",
                 ));
             }
             H::Constant(_) | H::ConstTerm(_) | H::Local(_) | H::Definition(_) => {}
             H::Old(_) | H::Error => {
                 return Err(problem(
-                    expression.span,
+                    span,
                     "defer contains an unverified expression effect",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, id: hir::ExprId) -> Result<(), CleanupError> {
+        if std::mem::replace(&mut self.seen_places[id.0 as usize], true) {
+            return Ok(());
+        }
+        // Projecting/borrowing existing storage does not create an owned value.
+        // Rvalue bases still materialize and must retain their Drop obligations.
+        match &self.function.expressions[id].kind {
+            H::Local(_) => {}
+            H::Field { base, .. } | H::VariantField { base, .. } | H::Group(base) => {
+                self.pending.push(Work::Place(*base))
+            }
+            H::Unary {
+                op: crate::syntax::ast::UnaryOp::Dereference,
+                operand,
+            } => self.expression_work(*operand),
+            H::Index { base, index } => {
+                self.pending.push(Work::Place(*base));
+                self.expression_work(*index);
+            }
+            _ => self.expression_work(id),
         }
         Ok(())
     }

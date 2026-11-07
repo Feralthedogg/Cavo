@@ -9,7 +9,7 @@ use super::{
 };
 use crate::arena::Access as _;
 use crate::{
-    diagnostic::{Diagnostic, report},
+    diagnostic::{Diagnostic, MoveCertainty, report},
     hir::{self, ExprId, ExprKind as H},
     source::Span,
     syntax::ast::{BinaryOp, UnaryOp},
@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 mod memory;
 mod report;
-use report::{Check, Problem, Reporter};
+use report::{AvailabilityFailure, Check, Problem, Reporter};
 
 const AVAILABLE: u8 = 1;
 const UNINITIALIZED: u8 = 2;
@@ -778,14 +778,10 @@ pub(super) fn analyze(
             .note("no memory transformer was approved for callers"),
         );
     }
-    let mut seen = HashSet::new();
-    for diagnostic in reporter.diagnostics {
-        if seen.insert((
-            diagnostic.code,
-            diagnostic.primary.file.0,
-            diagnostic.primary.start,
-            diagnostic.primary.end,
-        )) {
+    for diagnostic in reporter.take_diagnostics() {
+        // Distinct owners can end at the same brace. Only identical source
+        // explanations are duplicates; the output list is capped at 100.
+        if !diagnostics.contains(&diagnostic) {
             report(diagnostics, diagnostic);
         }
     }
@@ -1220,9 +1216,12 @@ impl<R: Reporter> Evaluator<'_, R> {
                     .map(|(_, event, _)| event)
                     .collect();
                 let span = self.graph.event(event).span;
-                let diagnostic = loans
-                    .first()
-                    .map(|&loan| Problem::StorageEnd { span, loan });
+                let diagnostic = loans.first().map(|&loan| Problem::StorageEnd {
+                    span,
+                    loan,
+                    end: event,
+                    owner: local,
+                });
                 self.finding(
                     Predicate::StorageMayEnd(local),
                     span,
@@ -1241,14 +1240,20 @@ impl<R: Reporter> Evaluator<'_, R> {
                         Origin::Borrow { place, event, .. }
                             if self.places.input_source(*place).is_none() =>
                         {
-                            Some((self.places.owner(*place).0, *event))
+                            Some((self.places.owner(*place), *event))
                         }
                         _ => None,
                     });
                     let diagnostic = local.map(|(owner, event)| Problem::LocalReturn {
                         span,
-                        storage: self.function.locals[owner as usize].span,
+                        storage: self
+                            .function
+                            .locals
+                            .get_id(owner)
+                            .expect("local borrow owner")
+                            .span,
                         borrow: self.graph.event(event).span,
+                        owner,
                     });
                     self.finding(
                         Predicate::ReturnDoesNotBorrowLocalStorage,
@@ -2460,10 +2465,26 @@ impl<R: Reporter> Evaluator<'_, R> {
         let slot = self.summary(place, state);
         let local = self.places.owner(place);
         let valid = slot.flags == AVAILABLE;
+        let failure = if slot.flags & MOVED != 0 {
+            let certainty = if self
+                .places
+                .leaves(place)
+                .any(|index| state.slots[index].flags == MOVED)
+            {
+                MoveCertainty::Definite
+            } else {
+                MoveCertainty::Possible
+            };
+            AvailabilityFailure::Moved(certainty)
+        } else if slot.flags & DEAD != 0 && slot.flags & UNINITIALIZED == 0 {
+            AvailabilityFailure::StorageEnded
+        } else {
+            AvailabilityFailure::Uninitialized
+        };
         let diagnostic = (!valid && slot.flags != POISON).then_some(Problem::Availability {
             span,
             binding: self.function.locals.get_id(local).map(|l| l.span),
-            flags: slot.flags,
+            failure,
             causes: &slot.causes,
         });
         self.finding(

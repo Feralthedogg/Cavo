@@ -3,6 +3,7 @@ mod calls;
 mod flow;
 mod operations;
 mod task_scopes;
+use crate::diagnostic::MoveCertainty;
 use crate::{local::properties::Properties, types::Ty};
 use std::{collections::HashSet, fmt};
 
@@ -21,8 +22,15 @@ pub struct InvariantError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind {
     Invariant,
-    ValueUnavailable,
+    ValueUnavailable { moved_at: Option<MoveCause> },
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MoveCause {
+    span: Span,
+    certainty: MoveCertainty,
+}
+
 impl InvariantError {
     pub fn new(message: String) -> Self {
         Self {
@@ -31,11 +39,11 @@ impl InvariantError {
             kind: FailureKind::Invariant,
         }
     }
-    fn unavailable(message: &str) -> Self {
+    fn unavailable(message: &str, moved_at: Option<MoveCause>) -> Self {
         Self {
             message: message.into(),
             span: None,
-            kind: FailureKind::ValueUnavailable,
+            kind: FailureKind::ValueUnavailable { moved_at },
         }
     }
     fn at(mut self, span: Span) -> Self {
@@ -49,7 +57,32 @@ impl InvariantError {
         self
     }
     pub fn user_code(&self) -> Option<&'static str> {
-        (self.kind == FailureKind::ValueUnavailable).then_some("E-MOVE-USE")
+        match self.kind {
+            FailureKind::Invariant => None,
+            FailureKind::ValueUnavailable { moved_at: Some(_) } => Some("E-MOVE-USE"),
+            FailureKind::ValueUnavailable { moved_at: None } => Some("E-INIT-READ"),
+        }
+    }
+
+    pub(crate) fn user_diagnostic(&self, fallback: Span) -> Option<crate::diagnostic::Diagnostic> {
+        use crate::diagnostic::Diagnostic;
+        let code = self.user_code()?;
+        let span = self.span.unwrap_or(fallback);
+        let diagnostic = match self.kind {
+            FailureKind::ValueUnavailable {
+                moved_at: Some(moved),
+            } => moved
+                .certainty
+                .diagnostic(span)
+                .label(moved.span, "ownership moved here"),
+            FailureKind::ValueUnavailable { moved_at: None } => {
+                Diagnostic::error(code, "value is not initialized on every path", span)
+                    .primary_label("used here before it is definitely initialized")
+                    .help("initialize this place on every path before using it")
+            }
+            FailureKind::Invariant => return None,
+        };
+        Some(diagnostic)
     }
 }
 

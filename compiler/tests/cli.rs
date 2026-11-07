@@ -488,6 +488,42 @@ fn failed_local_checks_still_emit_the_rejected_source_backed_report() {
 }
 
 #[test]
+fn source_diagnostics_use_stderr_and_exit_one_without_internal_mir_ids() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for (file, code, cause) in [
+        ("diagnostic-move.cavo", "E-MOVE-USE", "ownership moved here"),
+        (
+            "diagnostic-contract.cavo",
+            "E-CONTRACT-003",
+            "for `read_word`",
+        ),
+        (
+            "diagnostic-lifetime.cavo",
+            "E-BORROW-LIFETIME",
+            "reference used after this storage ends",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cavoite"))
+            .arg(fixtures.join(file))
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{file}");
+        assert!(output.stdout.is_empty(), "{file}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(&format!("error[{code}]:")), "{stderr}");
+        assert!(stderr.contains(cause), "{stderr}");
+        assert!(stderr.contains("= help:"), "{stderr}");
+        assert!(
+            stderr.contains("aborting due to 1 previous error"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("function #"), "{stderr}");
+        assert!(!stderr.contains("E-INIT-READ"), "{stderr}");
+    }
+}
+
+#[test]
 fn field_loans_expose_place_paths_and_english_conflict_labels() {
     let binary = env!("CARGO_BIN_EXE_cavoite");
     let success = Command::new(binary)

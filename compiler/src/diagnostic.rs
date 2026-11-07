@@ -7,6 +7,30 @@ pub(crate) fn report(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic) 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveCertainty {
+    Definite,
+    Possible,
+}
+
+impl MoveCertainty {
+    pub(crate) fn diagnostic(self, span: Span) -> Diagnostic {
+        let (message, label) = match self {
+            Self::Definite => (
+                "value was moved before this use",
+                "this place has already been moved",
+            ),
+            Self::Possible => (
+                "value may have been moved before this use",
+                "this place is not available on every incoming path",
+            ),
+        };
+        Diagnostic::error("E-MOVE-USE", message, span)
+            .primary_label(label)
+            .help("use the new owner, or reinitialize this place before using it")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Label {
     pub span: Span,
@@ -91,6 +115,9 @@ impl Diagnostic {
             render_source(&mut output, sources.file(file), &annotations, ":::");
         }
         let indent = " ".repeat(width + 1);
+        if !self.notes.is_empty() || !self.helps.is_empty() {
+            let _ = writeln!(output, "{indent}|");
+        }
         for note in &self.notes {
             render_message(&mut output, &indent, "note", note);
         }
@@ -115,12 +142,10 @@ struct Marker<'a> {
     primary: bool,
 }
 
-fn render_source(
-    output: &mut String,
+fn source_lines<'a>(
     source: &SourceFile,
-    annotations: &[Annotation<'_>],
-    arrow: &str,
-) -> usize {
+    annotations: &[Annotation<'a>],
+) -> BTreeMap<usize, Vec<Marker<'a>>> {
     let mut lines: BTreeMap<usize, Vec<Marker<'_>>> = BTreeMap::new();
     for annotation in annotations {
         let span = annotation.span;
@@ -147,6 +172,16 @@ fn render_source(
             });
         }
     }
+    lines
+}
+
+fn render_source(
+    output: &mut String,
+    source: &SourceFile,
+    annotations: &[Annotation<'_>],
+    arrow: &str,
+) -> usize {
+    let lines = source_lines(source, annotations);
     let width = lines
         .last_key_value()
         .expect("annotated source line")
@@ -164,7 +199,7 @@ fn render_source(
     let mut previous = None;
     for (line, mut markers) in lines {
         if previous.is_some_and(|previous| line > previous + 1) {
-            let _ = writeln!(output, "{:width$} | ...", "");
+            let _ = writeln!(output, "{:width$} ...", "");
         }
         let rendered = RenderedLine::new(source.line(line));
         let _ = writeln!(output, "{line:>width$} | {}", rendered.text);
@@ -187,7 +222,6 @@ fn render_source(
         }
         previous = Some(line);
     }
-    let _ = writeln!(output, "{:width$} |", "");
     width
 }
 

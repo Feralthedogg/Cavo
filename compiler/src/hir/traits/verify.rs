@@ -80,51 +80,84 @@ fn validate_impls(program: &Program) -> Result<(), InvariantError> {
         if let Some(trait_ref) = &implementation.trait_ref {
             reference(program, trait_ref)?;
         }
-        let mut declarations = HashSet::new();
-        let mut bodies = HashSet::new();
-        for method in &implementation.methods {
-            require(
-                bodies.insert(method.implementation),
-                "duplicate impl method",
-            )?;
-            require(
-                definition(program, method.implementation)?.kind == DefinitionKind::Function,
-                "impl method is not a function",
-            )?;
-            if let Some(declaration) = method.declaration {
-                require(
-                    declarations.insert(declaration),
-                    "duplicate trait method witness",
-                )?;
-                let reference = implementation
-                    .trait_ref
-                    .as_ref()
-                    .ok_or_else(|| error("inherent impl claims a trait method"))?;
-                require(
-                    program.traits.iter().any(|trait_| {
-                        trait_.definition == reference.definition
-                            && trait_
-                                .methods
-                                .iter()
-                                .any(|method| method.definition == declaration)
-                    }),
-                    "impl method belongs to another trait",
-                )?;
-            }
-        }
-        if let Some(reference) = &implementation.trait_ref {
-            let trait_ = program
-                .traits
-                .iter()
-                .find(|trait_| trait_.definition == reference.definition)
-                .ok_or_else(|| error("impl trait metadata is absent"))?;
-            require(
-                declarations.len() == trait_.methods.len(),
-                "impl has no witness for every required trait method",
-            )?;
+        if implementation.negative {
+            validate_negative(program, implementation)?;
+        } else {
+            validate_impl_methods(program, implementation)?;
         }
     }
     Ok(())
+}
+
+fn validate_impl_methods(program: &Program, implementation: &Impl) -> Result<(), InvariantError> {
+    let mut declarations = HashSet::new();
+    let mut bodies = HashSet::new();
+    for method in &implementation.methods {
+        require(
+            bodies.insert(method.implementation),
+            "duplicate impl method",
+        )?;
+        require(
+            definition(program, method.implementation)?.kind == DefinitionKind::Function,
+            "impl method is not a function",
+        )?;
+        if let Some(declaration) = method.declaration {
+            require(
+                declarations.insert(declaration),
+                "duplicate trait method witness",
+            )?;
+            let reference = implementation
+                .trait_ref
+                .as_ref()
+                .ok_or_else(|| error("inherent impl claims a trait method"))?;
+            require(
+                program.traits.iter().any(|trait_| {
+                    trait_.definition == reference.definition
+                        && trait_
+                            .methods
+                            .iter()
+                            .any(|method| method.definition == declaration)
+                }),
+                "impl method belongs to another trait",
+            )?;
+        }
+    }
+    if let Some(reference) = &implementation.trait_ref {
+        let trait_ = program
+            .traits
+            .iter()
+            .find(|trait_| trait_.definition == reference.definition)
+            .ok_or_else(|| error("impl trait metadata is absent"))?;
+        require(
+            declarations.len() == trait_.methods.len(),
+            "impl has no witness for every required trait method",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_negative(program: &Program, implementation: &Impl) -> Result<(), InvariantError> {
+    let role = implementation.trait_ref.as_ref().and_then(|reference| {
+        program
+            .traits
+            .iter()
+            .find(|trait_| trait_.definition == reference.definition)?
+            .language_item
+    });
+    require(
+        role.and_then(crate::tasks::transfer::Property::from_role)
+            .is_some()
+            && implementation.methods.is_empty()
+            && !program
+                .tasks
+                .trusted
+                .contains_key(&implementation.definition)
+            && matches!(
+                program.types.get(implementation.target),
+                crate::types::Ty::Named { .. }
+            ),
+        "invalid negative structural marker implementation",
+    )
 }
 
 fn validate_table(program: &Program, table: &Vtable) -> Result<(), InvariantError> {

@@ -1,0 +1,103 @@
+(* Cavo 0.1 frozen source grammar. UTF-8 source, ASCII identifiers.
+   This file fixes syntax, not successful type checking or native coverage.
+   Trivia: whitespace, // line comments and nested /* block comments */.
+   Longest token wins; >> and && split only in type/reference contexts.
+   EBNF notation: [] optional, {} repetition, | alternative, quoted terminals.
+   Record/or/range patterns, inline assembly and pipeline operators are excluded.
+   `|` in expression is integer bitwise OR, not a pipeline operator. *)
+
+module = [ "module", path, ";" ], { import | item } ;
+import = "import", path, ";" ;
+path = identifier, { "::", identifier } ;
+item = { attribute }, [ visibility ], declaration ;
+visibility = "pub", [ "(", "package", ")" ] ;
+declaration = function | record | enumeration | alias | trait | implementation
+            | contract-declaration | extern-block | variable, ";" | static-assert ;
+attribute = "@", identifier, [ "(", { attribute-token }, ")" ] ;
+attribute-token = token | "(", { attribute-token }, ")"
+                       | "[", { attribute-token }, "]" | "{", { attribute-token }, "}" ;
+record = ( "struct" | "union" ), identifier, [ generics ], "{", { field | static-assert }, "}", [ ";" ] ;
+field = [ visibility ], type, identifier, ";" ;
+enumeration = "enum", identifier, [ generics ], "{", [ variants ], "}", [ ";" ] ;
+variants = variant, { ",", variant }, [ "," ] ;
+variant = identifier, [ "(", [ types ], ")" | "{", { field }, "}" ], [ "=", expression ] ;
+alias = "type", identifier, [ generics ], "=", type, ";" ;
+trait = "trait", identifier, [ generics ], [ ":", bounds ], "{", { item }, "}" ;
+implementation = "impl", [ generics ], [ "!" ], type, [ "for", type ], "{", { item }, "}"
+               | "contract", "impl", [ generics ], type, [ "for", type ], "because", string, ";" ;
+function = [ "const" ], type, identifier, [ generics ], parameters, { clause }, ( block | ";" ) ;
+parameters = "(", [ "..." | parameter, { ",", parameter }, [ ",", [ "..." ] ] ], ")" ;
+parameter = [ "move" ], type, identifier ;
+clause = ( "requires" | "ensures" ), expression ;
+contract-declaration = "contract", identifier, [ generics ], parameters,
+                       "{", { "requires", expression, ";" }, "}" ;
+extern-block = "extern", string, "{", { item }, "}" ;
+generics = "<", [ generic, { ",", generic }, [ "," ] ], ">" ;
+generic = lifetime | identifier, [ ":", bounds ] | "const", type, identifier ;
+bounds = type, { "+", type } ;
+generic-arguments = "<", [ generic-argument, { ",", generic-argument }, [ "," ] ], ">" ;
+generic-argument = lifetime | type | integer ;
+types = type, { ",", type }, [ "," ] ;
+type = ( "&", [ lifetime ], [ "mut" ], type
+       | "const", type | "[", type, "]" | callable | "dyn", bounds
+       | path, [ generic-arguments ] | "auto" | "_" ), { "[", expression, "]" } ;
+callable = [ "for", "<", lifetime, { ",", lifetime }, ">" ],
+           "fn", "(", [ types ], ")", "->", type, { attribute } ;
+
+block = "{", { statement }, "}" ;
+statement = block | variable, ";" | assignment, ";" | expression, ";" | ";"
+          | "return", [ expression ], ";" | "break", ";" | "continue", ";"
+          | if-statement
+          | "while", "(", expression, ")", block | for-statement
+          | "scope", [ identifier ], block | "contract", block | "defer", block
+          | "assume", expression, "because", string, ";" | static-assert ;
+variable = [ "const" ], type, identifier, [ "=", expression ] ;
+if-statement = "if", "(", expression, ")", block, [ "else", ( if-statement | block ) ] ;
+assignment = expression, assign-op, expression ;
+assign-op = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+for-statement = "for", "(", [ variable | assignment | expression ], ";",
+                [ expression ], ";", [ assignment | expression ], ")", block
+              | "for", "(", variable, "in", expression, ")", block ;
+static-assert = "static_assert", "(", expression, [ ",", string ], ")", ";" ;
+
+(* Pratt binding powers, weakest to strongest:
+   ||; &&; |; ^; &; == !=; < <= > >=; << >>; + -; * / %; prefix; postfix.
+   Comparison chains are rejected. Assignment is a statement, not an expression.
+   Conditions require parentheses. A non-parenthesized match subject suppresses
+   record literals, preserving `match value { ... }` without a lookahead guess.
+   Contract predicate contexts additionally permit generic-arguments immediately
+   before arguments without :: (Readable<T>(p, 1)). Source restrictions such as
+   marker-only negative impls and non-variadic closures are semantic constraints. *)
+expression = prefix, { postfix | binary-op, prefix } ;
+prefix = literal | path | record-value | array | closure | match | block
+       | "(", expression, ")" | unary-op, expression ;
+unary-op = "+" | "-" | "!" | "~" | "*" | "&", [ "mut" ] | "move" | "spawn" ;
+binary-op = "||" | "&&" | "|" | "^" | "&" | "==" | "!=" | "<" | "<="
+          | ">" | ">=" | "<<" | ">>" | "+" | "-" | "*" | "/" | "%" ;
+postfix = arguments | "::", generic-arguments, arguments
+        | "::", generic-arguments, "::", identifier, [ "::", generic-arguments ], [ arguments ]
+        | ".", identifier | "[", expression, "]" | "?" ;
+arguments = "(", [ expression, { ",", expression }, [ "," ] ], ")" ;
+record-value = path, "{", [ identifier, ":", expression,
+              { ",", identifier, ":", expression }, [ "," ] ], "}" ;
+array = "[", [ expression, { ",", expression }, [ "," ] ], "]"
+      | "[", expression, ";", expression, "]" ;
+closure = "[", [ capture, { ",", capture }, [ "," ] ], "]", parameters,
+          [ "->", type ], block ;
+capture = ( "move" | "&", [ "mut" ] ), identifier ;
+match = "match", expression, "{", [ arm, { ",", arm }, [ "," ] ], "}" ;
+arm = pattern, [ "if", expression ], "=>", expression ;
+pattern = "_" | path, [ "(", pattern, { ",", pattern }, [ "," ], ")" ]
+        | integer | character | "true" | "false" ;
+literal = integer | floating | string | character | "true" | "false" | "null" ;
+
+(* Lexical productions are defined by syntax/lexer.rs and token.rs. A bare _
+   and reserved keywords are separate tokens, not identifier names. Numeric
+   bases, separators, suffix validity and scalar escape values are checked by
+   lexical/semantic tests rather than an implementation-specific EBNF engine. *)
+identifier = ( ascii-letter | "_" ), { ascii-letter | ascii-digit | "_" } ;
+lifetime = "'", identifier ;
+integer = numeric-integer-token ;
+floating = numeric-float-token ;
+string = quoted-string-token ;
+character = quoted-character-token ;

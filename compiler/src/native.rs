@@ -1,9 +1,11 @@
 //! External LLVM tools keep the compiler itself free of unsafe LLVM FFI.
 //! Managed objects retain LLAM's IR/machine passes and final-image admission.
+mod doctor;
 mod pipeline;
 mod scratch;
 mod sdk;
 mod tools;
+pub use doctor::{Doctor, diagnose};
 
 use crate::{codegen, mono, source::Span, symbol::Interner};
 pub use sdk::prepare as prepare_sdk;
@@ -25,11 +27,32 @@ pub enum OutputKind {
     Executable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Optimization {
+    O0,
+    O2,
+}
+impl Optimization {
+    pub fn profile(self) -> &'static str {
+        match self {
+            Self::O0 => "debug",
+            Self::O2 => "release",
+        }
+    }
+    fn llvm(self) -> &'static str {
+        match self {
+            Self::O0 => "O0",
+            Self::O2 => "O2",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub llvm_bin: Option<PathBuf>,
     pub llam_sdk: Option<PathBuf>,
     pub runtime: Runtime,
+    pub optimization: Optimization,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -37,6 +60,7 @@ impl Default for Options {
             llvm_bin: None,
             llam_sdk: None,
             runtime: Runtime::Llam,
+            optimization: Optimization::O2,
         }
     }
 }
@@ -73,8 +97,7 @@ pub fn llvm_ir(
     symbols: &Interner,
     options: &Options,
 ) -> Result<String, Error> {
-    let tools = Tools::discover(options)?;
-    Ok(codegen::emit(program, symbols, &tools.target)?.llvm_ir)
+    Compiler::new(options)?.llvm_ir(program, symbols)
 }
 
 pub fn build(
@@ -84,21 +107,67 @@ pub fn build(
     kind: OutputKind,
     output: &Path,
 ) -> Result<Build, Error> {
-    let tools = Tools::discover(options)?;
-    let artifact = codegen::emit(program, symbols, &tools.target)?;
-    if options.runtime == Runtime::Llam {
-        managed_frames(program, symbols)?;
+    Compiler::new(options)?.build(program, symbols, kind, output)
+}
+
+/// A CLI invocation validates its toolchain once, before choosing a target path.
+pub(crate) struct Compiler {
+    tools: Tools,
+    options: Options,
+}
+impl Compiler {
+    pub fn new(options: &Options) -> Result<Self, Error> {
+        Ok(Self {
+            tools: Tools::discover(options)?,
+            options: options.clone(),
+        })
     }
-    let sdk = if options.runtime == Runtime::Llam {
-        Some(sdk::Sdk::load(options)?)
-    } else {
-        None
-    };
-    pipeline::build(&tools, sdk.as_ref(), artifact, kind, output)?;
-    Ok(Build {
-        target: tools.target,
-        runtime: options.runtime,
-    })
+    pub fn target(&self) -> &str {
+        &self.tools.target
+    }
+    pub fn llvm_ir(
+        &self,
+        program: &mut mono::Program,
+        symbols: &Interner,
+    ) -> Result<String, Error> {
+        Ok(codegen::emit(program, symbols, &self.tools.target)?.llvm_ir)
+    }
+    pub fn build(
+        &self,
+        program: &mut mono::Program,
+        symbols: &Interner,
+        kind: OutputKind,
+        output: &Path,
+    ) -> Result<Build, Error> {
+        let artifact = codegen::emit(program, symbols, &self.tools.target)?;
+        if self.options.runtime == Runtime::Llam {
+            managed_frames(program, symbols)?;
+        }
+        let sdk = if self.options.runtime == Runtime::Llam {
+            Some(sdk::Sdk::load(&self.options)?)
+        } else {
+            None
+        };
+        pipeline::build(
+            &self.tools,
+            sdk.as_ref(),
+            artifact,
+            kind,
+            output,
+            self.options.optimization,
+        )?;
+        Ok(Build {
+            target: self.tools.target.clone(),
+            runtime: self.options.runtime,
+        })
+    }
+}
+
+/// Checks a sealed managed image without resealing or modifying it.
+pub fn verify_image(image: &Path, options: &Options) -> Result<u64, Error> {
+    let tools = Tools::discover(options)?;
+    let sdk = sdk::Sdk::load(options)?;
+    pipeline::check_image(&tools, &sdk, image)
 }
 
 fn managed_frames(program: &mut mono::Program, symbols: &Interner) -> Result<(), Error> {

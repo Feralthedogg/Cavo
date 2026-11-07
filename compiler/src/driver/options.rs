@@ -3,6 +3,7 @@ use crate::external::Digest;
 use std::{ffi::OsString, path::PathBuf};
 
 pub(super) struct Options {
+    pub native: Native,
     pub modules: Vec<PathBuf>,
     pub manifest: Option<PathBuf>,
     pub locked: bool,
@@ -13,10 +14,37 @@ pub(super) struct Options {
     pub summary_paths: Vec<PathBuf>,
     pub trusted: Vec<Digest>,
 }
+
+pub(super) struct Native {
+    pub backend: crate::native::Options,
+    pub output: Option<PathBuf>,
+    pub source: Option<PathBuf>,
+    pub build: Option<PathBuf>,
+    pub probe: bool,
+    specified: bool,
+    backend_specified: bool,
+}
+impl Default for Native {
+    fn default() -> Self {
+        Self {
+            backend: crate::native::Options {
+                optimization: crate::native::Optimization::O0,
+                ..crate::native::Options::default()
+            },
+            output: None,
+            source: None,
+            build: None,
+            probe: true,
+            specified: false,
+            backend_specified: false,
+        }
+    }
+}
 pub(super) enum Action {
     Help,
     Version,
-    Run(Options),
+    Grammar,
+    Run(Box<Options>),
 }
 pub(super) enum Error {
     Usage,
@@ -32,6 +60,7 @@ impl Error {
 /// compilation. `--` preserves non-UTF-8 paths and literal command-like names.
 pub(super) fn parse(arguments: &[OsString]) -> Result<Action, Error> {
     let mut options = Options {
+        native: Native::default(),
         modules: Vec::new(),
         manifest: None,
         locked: false,
@@ -63,6 +92,7 @@ pub(super) fn parse(arguments: &[OsString]) -> Result<Action, Error> {
                 }
                 "--help" | "-h" => return Ok(Action::Help),
                 "--version" | "-V" => return Ok(Action::Version),
+                "--grammar" => return Ok(Action::Grammar),
                 text if text.starts_with('-')
                     && value_option(text, &mut options, &mut arguments)? =>
                 {
@@ -84,6 +114,9 @@ fn value_option<'a>(
     options: &mut Options,
     arguments: &mut std::slice::Iter<'a, OsString>,
 ) -> Result<bool, Error> {
+    if native_option(text, &mut options.native, arguments)? {
+        return Ok(true);
+    }
     match text {
         "--summary" => {
             options.summary_paths.push(PathBuf::from(
@@ -129,6 +162,11 @@ fn command(text: &str) -> Option<Mode> {
         "lex" => Mode::Lex,
         "summary-id" => Mode::SummaryId,
         "lock" => Mode::Lock,
+        "build" => Mode::Build,
+        "run" => Mode::Run,
+        "doctor" => Mode::Doctor,
+        "clean" => Mode::Clean,
+        "sdk" => Mode::Sdk,
         _ => return None,
     })
 }
@@ -144,6 +182,8 @@ fn emission(text: &str) -> Result<Emit, Error> {
         "--emit=interface" => Emit::Interface,
         "--emit=module" => Emit::Module,
         "--emit=contracts" => Emit::Contracts,
+        "--emit=llvm-ir" => Emit::LlvmIr,
+        "--emit=obj" => Emit::Object,
         _ => return Err(Error::Message(format!("unsupported option {text:?}"))),
     })
 }
@@ -161,6 +201,10 @@ fn trusted_digest(argument: Option<&OsString>) -> Result<Digest, Error> {
 }
 
 fn validate(mut options: Options) -> Result<Action, Error> {
+    if options.mode.tool() {
+        validate_tool(&options)?;
+        return Ok(Action::Run(Box::new(options)));
+    }
     if options.paths.is_empty() && options.manifest.is_none() {
         return Err(Error::Usage);
     }
@@ -170,21 +214,23 @@ fn validate(mut options: Options) -> Result<Action, Error> {
         ));
     }
     if options.mode == Mode::Lock {
-        if options.manifest.is_none()
-            || options.emit != Emit::None
-            || options.locked
-            || !options.modules.is_empty()
-            || !options.summary_paths.is_empty()
-            || !options.trusted.is_empty()
-        {
-            return Err(Error::message(
-                "lock requires only --manifest-path and optional --offline",
-            ));
-        }
-        return Ok(Action::Run(options));
+        validate_lock(&options)?;
+        return Ok(Action::Run(Box::new(options)));
     }
-    if options.mode != Mode::Check && (options.manifest.is_some() || !options.modules.is_empty()) {
+    if options.mode != Mode::Check
+        && !options.mode.native()
+        && (options.manifest.is_some() || !options.modules.is_empty())
+    {
         return Err(Error::message("modules and packages require check mode"));
+    }
+    if options.mode.native() {
+        validate_native(&options)?;
+        return Ok(Action::Run(Box::new(options)));
+    }
+    if options.native.specified {
+        return Err(Error::message(
+            "native options require build, run, doctor or sdk mode",
+        ));
     }
     if options.manifest.is_none() && (options.locked || options.offline) {
         return Err(Error::message("--locked/--offline require --manifest-path"));
@@ -199,7 +245,7 @@ fn validate(mut options: Options) -> Result<Action, Error> {
                 "summary-id requires exactly one summary path",
             ));
         }
-        return Ok(Action::Run(options));
+        return Ok(Action::Run(Box::new(options)));
     }
     if options.emit == Emit::Ast {
         options.mode = Mode::Parse;
@@ -208,10 +254,29 @@ fn validate(mut options: Options) -> Result<Action, Error> {
         options.mode = Mode::Lex;
     }
     validate_emission(&options)?;
-    Ok(Action::Run(options))
+    Ok(Action::Run(Box::new(options)))
+}
+
+fn validate_lock(options: &Options) -> Result<(), Error> {
+    if options.manifest.is_none()
+        || options.emit != Emit::None
+        || options.locked
+        || !options.modules.is_empty()
+        || !options.summary_paths.is_empty()
+        || !options.trusted.is_empty()
+        || options.native.specified
+    {
+        return Err(Error::message(
+            "lock requires only --manifest-path and optional --offline",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_emission(options: &Options) -> Result<(), Error> {
+    if matches!(options.emit, Emit::LlvmIr | Emit::Object) {
+        return Err(Error::message("native emission requires build mode"));
+    }
     if options.mode != Mode::Check {
         if options.emit == Emit::Mono {
             return Err(Error::message("monomorphized emission requires check mode"));
@@ -238,4 +303,114 @@ fn validate_emission(options: &Options) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn native_option<'a>(
+    text: &str,
+    options: &mut Native,
+    arguments: &mut std::slice::Iter<'a, OsString>,
+) -> Result<bool, Error> {
+    if backend_option(text, &mut options.backend, arguments)? {
+        options.specified = true;
+        options.backend_specified = true;
+        return Ok(true);
+    }
+    match text {
+        "-o" | "--output" => native_path(&mut options.output, arguments.next(), "--output")?,
+        "--llam-source" => native_path(&mut options.source, arguments.next(), "--llam-source")?,
+        "--llam-build" => native_path(&mut options.build, arguments.next(), "--llam-build")?,
+        "--no-probe" => options.probe = false,
+        _ => return Ok(false),
+    }
+    options.specified = true;
+    Ok(true)
+}
+
+fn backend_option<'a>(
+    text: &str,
+    options: &mut crate::native::Options,
+    arguments: &mut std::slice::Iter<'a, OsString>,
+) -> Result<bool, Error> {
+    use crate::native::{Optimization, Runtime};
+    match text {
+        "--llvm-bin" => native_path(&mut options.llvm_bin, arguments.next(), "--llvm-bin")?,
+        "--llam-sdk" => native_path(&mut options.llam_sdk, arguments.next(), "--llam-sdk")?,
+        "-O0" => options.optimization = Optimization::O0,
+        "-O2" | "--release" => options.optimization = Optimization::O2,
+        "--runtime=llam" => options.runtime = Runtime::Llam,
+        "--runtime=none" => options.runtime = Runtime::None,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn native_path(
+    slot: &mut Option<PathBuf>,
+    argument: Option<&OsString>,
+    name: &str,
+) -> Result<(), Error> {
+    let path = argument.ok_or_else(|| Error::Message(format!("{name} requires a path")))?;
+    if slot.replace(PathBuf::from(path)).is_some() {
+        return Err(Error::Message(format!("duplicate {name}")));
+    }
+    Ok(())
+}
+
+fn validate_native(options: &Options) -> Result<(), Error> {
+    if options.manifest.is_none() && (options.locked || options.offline) {
+        return Err(Error::message("--locked/--offline require --manifest-path"));
+    }
+    if !matches!(options.emit, Emit::None | Emit::LlvmIr | Emit::Object) {
+        return Err(Error::message(
+            "build/run support --emit=llvm-ir or --emit=obj; use check for frontend dumps",
+        ));
+    }
+    if options.mode == Mode::Run && options.emit != Emit::None {
+        return Err(Error::message(
+            "run requires an executable, not an emission mode",
+        ));
+    }
+    if options.native.source.is_some() || options.native.build.is_some() || !options.native.probe {
+        return Err(Error::message(
+            "SDK preparation paths require sdk; --no-probe requires doctor",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tool(options: &Options) -> Result<(), Error> {
+    if !options.paths.is_empty()
+        || options.emit != Emit::None
+        || !options.modules.is_empty()
+        || !options.summary_paths.is_empty()
+        || !options.trusted.is_empty()
+        || options.locked
+        || options.offline
+    {
+        return Err(Error::message(
+            "doctor/clean/sdk do not accept source, emission, module or package-resolution arguments",
+        ));
+    }
+    match options.mode {
+        Mode::Doctor
+            if options.native.output.is_none()
+                && options.native.source.is_none()
+                && options.native.build.is_none() =>
+        {
+            Ok(())
+        }
+        Mode::Clean if !options.native.specified => Ok(()),
+        Mode::Sdk
+            if options.manifest.is_none()
+                && options.native.source.is_some()
+                && options.native.build.is_some()
+                && !options.native.backend_specified
+                && options.native.probe =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::message(
+            "sdk requires --llam-source and --llam-build; doctor/clean accept only their relevant options",
+        )),
+    }
 }

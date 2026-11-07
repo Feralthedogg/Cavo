@@ -148,6 +148,46 @@ fn opaque_drop_glue_is_not_a_proven_pure_cleanup_operation() {
 }
 
 #[test]
+fn concrete_drop_effects_propagate_and_destructor_recursion_is_not_bounded() {
+    let mut compilation = Compilation::default();
+    let source = "@lang(drop) trait Drop { void drop(&mut Self self); } struct Marker {} impl Drop for Marker { void drop(&mut Self self) { Marker next = Marker {}; } } @effects(bounded) void caller() { Marker value = Marker {}; }";
+    let file = compilation
+        .sources
+        .add("recursive-drop.cavo", source.into())
+        .unwrap();
+    compilation.parse(file);
+    assert!(compilation.check_mir().is_none());
+    assert!(
+        compilation.diagnostics.iter().any(|d| matches!(
+            d.code,
+            "E-DROP-EFFECT" | "E-EFFECT-BOUND" | "E-EFFECT-REFINE"
+        )),
+        "{:#?}",
+        compilation.diagnostics
+    );
+}
+
+#[test]
+fn a_private_recursive_callee_cannot_satisfy_a_callers_bounded_promise() {
+    let mut compilation = Compilation::default();
+    let source = "void recurse() { recurse(); } @effects(bounded) pub void caller() { recurse(); }";
+    let file = compilation
+        .sources
+        .add("recursive-call.cavo", source.into())
+        .unwrap();
+    compilation.parse(file);
+    assert!(compilation.check_mir().is_none());
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-EFFECT-BOUND" || d.code == "E-EFFECT-REFINE"),
+        "{:#?}",
+        compilation.diagnostics
+    );
+}
+
+#[test]
 fn source_cleanup_candidates_are_order_independent_and_reject_recursive_helpers() {
     let (compilation, mut hir, _) = lowered(
         "void forward(&mut i32 value) { leaf(value); } void leaf(&mut i32 value) { *value = 1; } void recursive() { recursive(); }",

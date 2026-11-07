@@ -445,6 +445,10 @@ impl Context<'_> {
 
     fn validate_implementation(&mut self, index: usize) {
         let implementation = self.program.implementations[index].clone();
+        if implementation.negative {
+            self.validate_negative_implementation(&implementation);
+            return;
+        }
         let Some(reference) = &implementation.trait_ref else {
             return;
         };

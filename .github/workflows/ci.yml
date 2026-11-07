@@ -1,4 +1,4 @@
-name: Frontend CI
+name: Compiler CI
 
 on:
   push:
@@ -58,3 +58,43 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Run unit, integration and documentation tests
         run: cargo test --workspace --profile ${{ matrix.profile }} --locked --offline
+
+  native:
+    name: Native and managed (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    env:
+      CAVO_NATIVE_REQUIRED: "1"
+      CAVO_MANAGED_REQUIRED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout compiler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Checkout pinned LLAM release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Feralthedogg/LLAM
+          ref: f0ea03c87be4a880b88a3b03bec48334762eb3d4 # 3.0.0
+          path: target/cavo-ci/llam
+          persist-credentials: false
+          clean: false
+      - name: Install Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates curl cmake ninja-build python3 zstd liburing-dev libffi-dev libedit-dev libxml2-dev zlib1g-dev libzstd-dev
+      - name: Install Rust
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Prepare LLVM and the required LLAM SDK
+        shell: bash
+        run: bash .github/scripts/native-check.sh prepare
+      - name: Test native code generation at O0 and O2
+        shell: bash
+        run: bash .github/scripts/native-check.sh check

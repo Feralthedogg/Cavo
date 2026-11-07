@@ -32,19 +32,22 @@ pub(crate) fn analyze(
     external: &[SummaryReport],
     sources: &crate::source::SourceMap,
 ) -> Result<Analysis, AnalysisError> {
-    let effects = effects::analyze(mir, hir, symbols, external).map_err(|error| AnalysisError {
-        code: "E-MIR-EFFECT",
+    let drops = drop::elaborate(mir, hir).map_err(|error| AnalysisError {
+        code: "E-MIR-DROP",
         message: error.to_string(),
     })?;
+    let effects =
+        effects::analyze_with_cleanup(mir, hir, symbols, external, &drops).map_err(|error| {
+            AnalysisError {
+                code: "E-MIR-EFFECT",
+                message: error.to_string(),
+            }
+        })?;
     let borrows =
         borrow::analyze_with_summaries(mir, hir, external).map_err(|error| AnalysisError {
             code: "E-MIR-BORROW",
             message: error.to_string(),
         })?;
-    let drops = drop::elaborate(mir, hir).map_err(|error| AnalysisError {
-        code: "E-MIR-DROP",
-        message: error.to_string(),
-    })?;
     let tasks =
         crate::tasks::analyze(mir, hir, symbols, &effects.functions).map_err(|message| {
             AnalysisError {

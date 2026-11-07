@@ -5,6 +5,7 @@ mod coherence;
 mod collect;
 mod drop_check;
 mod implementations;
+mod negative;
 pub(crate) use drop_check::validate_destructors;
 pub(crate) mod dynamic;
 

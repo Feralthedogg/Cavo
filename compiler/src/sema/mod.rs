@@ -874,10 +874,11 @@ impl Context<'_> {
         let definition = self.lookup(module, path);
         let span = path.first()?.span.join(path.last()?.span);
         let Some(definition) = definition else {
-            self.error(
-                "E-NAME-UNKNOWN",
-                format!("unknown name '{}'", self.path_name(path)),
-                span,
+            let name = self.path_name(path);
+            report(
+                self.diagnostics,
+                Diagnostic::error("E-NAME-UNKNOWN", format!("unknown name '{name}'"), span)
+                    .primary_label(format!("'{name}' is not defined in this scope")),
             );
             return None;
         };
