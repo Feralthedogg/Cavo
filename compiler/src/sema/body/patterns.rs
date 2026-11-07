@@ -56,6 +56,9 @@ impl Body<'_, '_> {
             self.scopes.pop();
         }
         self.merge_match_exits(&before, &exits);
+        if self.type_is_error(view.ty) {
+            return self.add_expr(H::Error, TyId::ERROR, span);
+        }
         self.check_match_coverage(view.ty, &checked, span);
         let subject = if view.borrow.is_none()
             && !properties.get(ty).copy
@@ -186,6 +189,14 @@ impl Body<'_, '_> {
                 span: source.span,
             };
         }
+        if self.type_is_error(subject.ty) {
+            self.recover_pattern_bindings(source, depth);
+            return Pattern {
+                kind: PatternKind::Wildcard,
+                ty: TyId::ERROR,
+                span: source.span,
+            };
+        }
         let kind = match &source.kind {
             ast::PatternKind::Wildcard => PatternKind::Wildcard,
             ast::PatternKind::Error => {
@@ -205,6 +216,37 @@ impl Body<'_, '_> {
             kind,
             ty: subject.ty,
             span: source.span,
+        }
+    }
+
+    fn recover_pattern_bindings(&mut self, source: &ast::Pattern, depth: usize) {
+        if depth >= 128 {
+            self.context.error(
+                "E-MATCH-LIMIT",
+                "pattern exceeds its nesting limit",
+                source.span,
+            );
+            return;
+        }
+        match &source.kind {
+            ast::PatternKind::Path { path, fields } => {
+                if path.len() == 1 && fields.is_empty() {
+                    self.bind(path[0], TyId::ERROR, false, Init::Initialized);
+                } else {
+                    for field in fields {
+                        self.recover_pattern_bindings(field, depth + 1);
+                    }
+                }
+            }
+            ast::PatternKind::Literal(kind) => {
+                self.pattern_literal(*kind, TyId::ERROR, source.span);
+            }
+            ast::PatternKind::Error => self.context.error(
+                "E-MATCH-PATTERN",
+                "an invalid pattern cannot be type checked",
+                source.span,
+            ),
+            ast::PatternKind::Wildcard => {}
         }
     }
 

@@ -125,6 +125,7 @@ impl Compilation {
             &mut self.diagnostics,
             bindings,
             &self.external_summaries,
+            Some(&self.sources),
         );
         if let Err(error) = report.validate(program) {
             self.frontend_error(

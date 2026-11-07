@@ -88,7 +88,7 @@ impl Body<'_, '_> {
         span: Span,
     ) -> ExprId {
         let Some(mut call) = self.invocation(target.callee, span) else {
-            return self.add_expr(H::Error, TyId::ERROR, span);
+            return self.error_call(arguments, span);
         };
         if let Some(owner) = call.owner
             && let Some(role) = self.context.program.contracts.intrinsics.get(&owner)
@@ -144,6 +144,15 @@ impl Body<'_, '_> {
             self.ty(value),
             span,
         )
+    }
+
+    pub(super) fn error_call(&mut self, arguments: &[ast::ExprId], span: Span) -> ExprId {
+        // An invalid receiver/signature cannot determine argument types, but
+        // independent names and expressions must still be checked once.
+        for &argument in arguments {
+            self.expression(argument, None);
+        }
+        self.add_expr(H::Error, TyId::ERROR, span)
     }
 
     fn invocation(&mut self, callee: ExprId, span: Span) -> Option<Invocation> {

@@ -503,13 +503,13 @@ fn return_escape_reports_the_return_without_its_cleanup_cascade() {
         assert_eq!(codes, ["E-BORROW-RETURN"]);
         assert_eq!(
             compilation.diagnostics[0].primary_label.as_deref(),
-            Some("this reference would outlive its local owner")
+            Some("this reference would outlive `value`")
         );
         let rendered = compilation.diagnostics[0].render(&compilation.sources);
         assert!(
             rendered
                 .lines()
-                .any(|line| line.contains("^ this reference would outlive its local owner"))
+                .any(|line| line.contains("^ this reference would outlive `value`"))
         );
         let report = compilation.local_analysis.as_ref().unwrap();
         assert_eq!(report.verdict, Verdict::Rejected);
@@ -530,6 +530,199 @@ fn return_escape_reports_the_return_without_its_cleanup_cascade() {
                 .any(|f| matches!(f.predicate, Predicate::StorageMayEnd(_)))
         );
     }
+}
+
+fn assert_initialized_reads(compilation: &Compilation, name: &str) {
+    use cavo_compiler::local::{Assessment, Predicate, Verdict};
+    let report = compilation.local_analysis.as_ref().unwrap();
+    assert_eq!(report.verdict, Verdict::Rejected);
+    let reads: Vec<_> = report
+        .functions
+        .iter()
+        .flat_map(|f| &f.findings)
+        .filter(|f| {
+            matches!(f.predicate, Predicate::StorageAvailable(_))
+                && compilation.sources.file(f.span.file).slice(f.span) == name
+        })
+        .collect();
+    assert!(!reads.is_empty(), "no availability checks for {name}");
+    assert!(
+        reads
+            .iter()
+            .all(|f| f.assessment == Assessment::Established),
+        "{reads:#?}"
+    );
+}
+
+#[test]
+fn local_model_keeps_initialization_when_poison_joins_a_loop_backedge() {
+    let source = "i32 next_iter(i32 n) { i32 y; i32 total = 0; i32 i = 0; while (i < n) { if (i > 0) { total += y; } y = i; i += 1; } return total; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_initialized_reads(&compilation, "total");
+    assert_eq!(
+        compilation.diagnostics.len(),
+        1,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    let diagnostic = &compilation.diagnostics[0];
+    assert_eq!(diagnostic.code, "E-INIT-READ");
+    assert_eq!(
+        compilation
+            .sources
+            .file(diagnostic.primary.file)
+            .slice(diagnostic.primary),
+        "y"
+    );
+}
+
+#[test]
+fn local_model_joins_poisoned_and_clean_values_without_losing_initialization() {
+    let source = "i32 inspect(bool choose) { i32 y; i32 total = 0; if (choose) { total = y; } return total; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_initialized_reads(&compilation, "total");
+    assert!(
+        compilation
+            .local_analysis
+            .as_ref()
+            .unwrap()
+            .functions
+            .iter()
+            .flat_map(|f| &f.findings)
+            .any(
+                |f| matches!(f.predicate, cavo_compiler::local::Predicate::Available(_))
+                    && compilation.sources.file(f.span.file).slice(f.span) == "total"
+                    && f.assessment == cavo_compiler::local::Assessment::NotEstablished
+            ),
+        "initialized storage must not approve a poisoned value"
+    );
+    let return_check = compilation
+        .local_analysis
+        .as_ref()
+        .unwrap()
+        .functions
+        .iter()
+        .flat_map(|f| &f.findings)
+        .find(|f| f.predicate == cavo_compiler::local::Predicate::ReturnDoesNotBorrowLocalStorage)
+        .unwrap();
+    assert_eq!(
+        return_check.assessment,
+        cavo_compiler::local::Assessment::NotEstablished,
+        "poisoned data must remain invalid despite initialized storage"
+    );
+    assert_eq!(compilation.diagnostics.len(), 1);
+}
+
+#[test]
+fn local_model_a_real_overwrite_restores_value_health() {
+    let source = "i32 inspect(bool choose) { i32 y; i32 total = 0; if (choose) { total = y; } total = 5; return total; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_initialized_reads(&compilation, "total");
+    let return_check = compilation
+        .local_analysis
+        .as_ref()
+        .unwrap()
+        .functions
+        .iter()
+        .flat_map(|f| &f.findings)
+        .find(|f| f.predicate == cavo_compiler::local::Predicate::ReturnDoesNotBorrowLocalStorage)
+        .unwrap();
+    assert_eq!(
+        return_check.assessment,
+        cavo_compiler::local::Assessment::Established
+    );
+    assert_eq!(compilation.diagnostics.len(), 1);
+}
+
+#[test]
+fn local_model_poison_does_not_hide_a_truly_uninitialized_path() {
+    let source =
+        "i32 inspect(bool choose) { i32 y; i32 total; if (choose) { total = y; } return total; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    let missing: Vec<_> = compilation
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "E-INIT-READ")
+        .map(|d| compilation.sources.file(d.primary.file).slice(d.primary))
+        .collect();
+    assert!(
+        missing.contains(&"y") && missing.contains(&"total"),
+        "{missing:?}"
+    );
+}
+
+#[test]
+fn local_model_poison_does_not_hide_a_moved_path() {
+    let source = "struct Lease { i32 id; } i32 inspect(bool choose) { Lease value = Lease { id: 1 }; Lease missing; if (choose) { auto owner = move value; } else { value = move missing; } return value.id; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-INIT-READ")
+    );
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-MOVE-USE")
+    );
+}
+
+#[test]
+fn local_model_a_failed_borrow_does_not_register_a_new_loan() {
+    let source =
+        "void inspect(&mut i32 v) { &mut i32 a = &mut *v; &mut i32 b = &mut *v; *a = 1; *b = 2; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_eq!(
+        compilation.diagnostics.len(),
+        1,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    let diagnostic = &compilation.diagnostics[0];
+    assert_eq!(diagnostic.code, "E-BORROW-CONFLICT");
+    assert_eq!(
+        compilation
+            .sources
+            .file(diagnostic.primary.file)
+            .slice(diagnostic.primary),
+        "&mut *v"
+    );
+    assert_eq!(
+        diagnostic.primary.start,
+        source.rfind("&mut *v").unwrap() as u32
+    );
+}
+
+#[test]
+fn local_model_a_clean_loan_alternative_survives_a_poisoned_branch() {
+    let source = "struct Pair { i32 left; i32 right; } void inspect(bool choose, &mut Pair p) { auto a = &mut p.left; &mut i32 r; if (choose) { r = &mut p.left; } else { r = &mut p.right; } *a = 1; p.right = 2; *r = 3; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    let conflicts: Vec<_> = compilation
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "E-BORROW-CONFLICT")
+        .collect();
+    assert_eq!(conflicts.len(), 2, "{:#?}", compilation.diagnostics);
+    assert!(
+        conflicts
+            .iter()
+            .any(|d| d.primary.start == source.find("p.right = 2").unwrap() as u32),
+        "the valid right-field loan must remain live on its branch"
+    );
+    assert!(
+        !conflicts
+            .iter()
+            .any(|d| compilation.sources.file(d.primary.file).slice(d.primary) == "*a")
+    );
 }
 
 #[test]
@@ -577,6 +770,278 @@ fn return_escape_keeps_an_independent_initialization_error() {
         1
     );
     assert!(!codes.contains(&"E-BORROW-LIFETIME"));
+}
+
+#[test]
+fn return_owner_names_the_storage_behind_aliases_and_reborrows() {
+    for source in [
+        "&i32 escape() { i32 x = 1; auto a = &x; auto b = a; return b; }",
+        "&i32 escape() { i32 x = 1; auto a = &mut x; return &*a; }",
+        "&'a i32 id<'a>(&'a i32 value) { return value; } &i32 escape() { i32 x = 1; return id(&x); }",
+        "&i32 escape() { i32 x = 1; auto a = &x; { i32 x = 2; } return a; }",
+    ] {
+        let mut compilation = parse_diagnostic_source(source);
+        assert!(compilation.check().is_none());
+        assert_eq!(
+            compilation.diagnostics.len(),
+            1,
+            "{:#?}",
+            compilation.diagnostics
+        );
+        let diagnostic = &compilation.diagnostics[0];
+        assert_eq!(diagnostic.code, "E-BORROW-RETURN");
+        assert_eq!(
+            diagnostic.primary_label.as_deref(),
+            Some("this reference would outlive `x`")
+        );
+        let storage = diagnostic
+            .labels
+            .iter()
+            .find(|label| label.message == "local storage is declared here")
+            .unwrap();
+        assert_eq!(storage.span.start, source.find("x = 1").unwrap() as u32);
+    }
+}
+
+#[test]
+fn return_owner_keeps_both_distinct_branch_causes_with_the_same_code() {
+    let source = "&i32 escape(bool c) { i32 x = 1; i32 y = 2; auto r = &x; if (c) { r = &y; } auto s = r; return s; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    let labels: Vec<_> = compilation
+        .diagnostics
+        .iter()
+        .map(|d| {
+            assert_eq!(d.code, "E-BORROW-RETURN", "{d:#?}");
+            d.primary_label.as_deref().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "this reference would outlive `x`",
+            "this reference would outlive `y`"
+        ]
+    );
+    let failed_ends = compilation
+        .local_analysis
+        .as_ref()
+        .unwrap()
+        .functions
+        .iter()
+        .flat_map(|f| &f.findings)
+        .filter(|f| {
+            matches!(
+                f.predicate,
+                cavo_compiler::local::Predicate::StorageMayEnd(_)
+            ) && f.assessment == cavo_compiler::local::Assessment::NotEstablished
+        })
+        .count();
+    assert!(
+        failed_ends >= 2,
+        "both failed storage obligations must survive presentation grouping"
+    );
+}
+
+#[test]
+fn return_owner_deduplicates_borrows_of_the_same_storage() {
+    let source =
+        "&i32 escape(bool c) { i32 x = 1; &i32 r; if (c) { r = &x; } else { r = &x; } return r; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_eq!(
+        compilation.diagnostics.len(),
+        1,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    assert_eq!(
+        compilation.diagnostics[0].primary_label.as_deref(),
+        Some("this reference would outlive `x`")
+    );
+}
+
+#[test]
+fn return_owner_input_region_failure_has_one_complete_explanation() {
+    let source = "&'a i32 first<'a, 'b>(&'a i32 value, &'b i32 other) { return other; }";
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(compilation.check().is_none());
+    assert_eq!(
+        compilation.diagnostics.len(),
+        1,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    let diagnostic = &compilation.diagnostics[0];
+    assert_eq!(diagnostic.code, "E-REGION-RETURN");
+    assert!(
+        diagnostic
+            .primary_label
+            .as_deref()
+            .unwrap()
+            .contains("actual origin")
+    );
+    assert!(
+        diagnostic
+            .labels
+            .iter()
+            .any(|label| label.message == "return region is declared by this signature")
+    );
+    assert!(
+        compilation
+            .local_analysis
+            .as_ref()
+            .unwrap()
+            .functions
+            .iter()
+            .flat_map(|f| &f.findings)
+            .any(
+                |f| f.predicate == cavo_compiler::local::Predicate::ReturnRegion
+                    && f.assessment == cavo_compiler::local::Assessment::NotEstablished
+            )
+    );
+}
+
+fn recovery_codes(source: &str) -> Vec<&'static str> {
+    let mut compilation = parse_diagnostic_source(source);
+    assert!(
+        compilation.check().is_none(),
+        "an error type must not approve this program"
+    );
+    compilation.diagnostics.iter().map(|d| d.code).collect()
+}
+
+#[test]
+fn recovery_error_receivers_do_not_invent_fields_or_methods() {
+    for source in [
+        "void inspect(Missing value) { auto a = value.bottom; a.load().next; value.clone(); }",
+        "struct Holder { Missing data; } void inspect(&Holder holder) { holder.data.bottom.load().next; }",
+        "type Broken = Missing; void inspect(Broken value) { value.load(); Broken::make(); }",
+        "void inspect(& &Missing value) { value.bottom.load(); }",
+    ] {
+        assert_eq!(recovery_codes(source), ["E-NAME-UNKNOWN"], "{source}");
+    }
+}
+
+#[test]
+fn recovery_invalid_calls_still_check_independent_arguments() {
+    let codes = recovery_codes(
+        "void inspect() { Missing::make(first_missing); Missing::again(second_missing); }",
+    );
+    assert_eq!(
+        codes,
+        ["E-NAME-UNKNOWN", "E-NAME-UNKNOWN", "E-NAME-UNKNOWN"]
+    );
+    let codes = recovery_codes(
+        "struct Holder { Missing data; } void inspect(Holder holder) { holder.data.load(another_missing); }",
+    );
+    assert_eq!(codes, ["E-NAME-UNKNOWN", "E-NAME-UNKNOWN"]);
+}
+
+#[test]
+fn recovery_unknown_construction_still_checks_initializer_expressions() {
+    let codes =
+        recovery_codes("void inspect() { auto value = Missing { field: independent_missing }; }");
+    assert_eq!(codes, ["E-NAME-UNKNOWN", "E-NAME-UNKNOWN"]);
+}
+
+#[test]
+fn recovery_known_nominal_shapes_keep_independent_member_errors() {
+    let source = "struct Holder<T> { T value; i32 ready; } void inspect(Holder<Missing> holder) { holder.value.load(); holder.typo; holder.missing_method(); }";
+    let codes = recovery_codes(source);
+    assert_eq!(
+        codes,
+        ["E-NAME-UNKNOWN", "E-TYPE-FIELD", "E-METHOD-SELECTION"]
+    );
+}
+
+#[test]
+fn recovery_unknown_match_subject_keeps_bindings_and_independent_arm_errors() {
+    let source = "i32 inspect(Missing value) { auto result = value.load()?; return match result { Some(item) => item.load(independent_missing), None => other_missing }; }";
+    let codes = recovery_codes(source);
+    assert_eq!(
+        codes,
+        ["E-NAME-UNKNOWN", "E-NAME-UNKNOWN", "E-NAME-UNKNOWN"]
+    );
+}
+
+#[test]
+fn recovery_a_real_try_error_survives_an_unrelated_missing_type() {
+    let codes = recovery_codes("void other(Missing value) {} i32 inspect() { return 1?; }");
+    assert_eq!(codes, ["E-NAME-UNKNOWN", "E-TRY-RESULT"]);
+}
+
+#[test]
+fn recovery_missing_roots_are_bounded_and_module_scoped() {
+    let mut compilation = Compilation::default();
+    let uses = (0..12)
+        .map(|i| format!("void f{i}(Missing value) {{}} "))
+        .collect::<String>();
+    for (path, source) in [
+        (
+            "left.cavo",
+            format!("module left; {uses} void calls() {{ Missing::make(); Missing::again(); }}"),
+        ),
+        (
+            "right.cavo",
+            "module right; void inspect(Missing value) {}".into(),
+        ),
+    ] {
+        let file = compilation.sources.add(path, source).unwrap();
+        compilation.parse(file);
+    }
+    assert!(compilation.check().is_none());
+    assert_eq!(
+        compilation.diagnostics.len(),
+        2,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .all(|d| d.code == "E-NAME-UNKNOWN" && d.labels.len() <= 4)
+    );
+    assert_eq!(compilation.diagnostics[0].labels.len(), 4);
+    assert_ne!(
+        compilation.diagnostics[0].primary.file,
+        compilation.diagnostics[1].primary.file
+    );
+}
+
+#[test]
+fn recovery_missing_members_of_a_known_module_are_distinct_roots() {
+    let mut compilation = Compilation::default();
+    for (path, source) in [
+        ("known.cavo", "module known; pub i32 exists() { return 1; }"),
+        (
+            "app.cavo",
+            "module app; import known; void inspect() { known::first_missing(); known::second_missing(); }",
+        ),
+    ] {
+        let file = compilation.sources.add(path, source.into()).unwrap();
+        compilation.parse(file);
+    }
+    assert!(compilation.check().is_none());
+    assert_eq!(
+        compilation.diagnostics.len(),
+        2,
+        "{:#?}",
+        compilation.diagnostics
+    );
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .all(|d| d.code == "E-NAME-UNKNOWN")
+    );
+    assert!(compilation.diagnostics[0].message.contains("first_missing"));
+    assert!(
+        compilation.diagnostics[1]
+            .message
+            .contains("second_missing")
+    );
 }
 
 #[test]

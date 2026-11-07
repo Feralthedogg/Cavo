@@ -10,7 +10,11 @@ pub(crate) mod properties;
 mod regions;
 
 use crate::external::{AssumptionId, Bindings, Summaries, SummaryReport, SummaryStatus};
-use crate::{diagnostic::Diagnostic, hir, source::Span};
+use crate::{
+    diagnostic::Diagnostic,
+    hir,
+    source::{SourceMap, Span},
+};
 pub use memory::{MemoryLoan, MemoryOrigin, MemoryPlace, MemorySummary, MemoryValue, MemoryWrite};
 pub use nll::NllReport;
 pub use place::{FieldProjection, Place, PlaceId};
@@ -133,6 +137,9 @@ pub struct Event {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Predicate {
+    /// Storage is live, initialized and unmoved; its contents may still be
+    /// poisoned by an earlier error. This does not establish a usable value.
+    StorageAvailable(PlaceId),
     Available(PlaceId),
     NoLoanConflict(PlaceId),
     StorageMayEnd(hir::LocalId),
@@ -336,9 +343,9 @@ impl Report {
             };
             let valid_predicate = |predicate| match predicate {
                 Predicate::StorageMayEnd(local) => (local.0 as usize) < graph.slots,
-                Predicate::Available(place) | Predicate::NoLoanConflict(place) => {
-                    (place.0 as usize) < report.places.len()
-                }
+                Predicate::StorageAvailable(place)
+                | Predicate::Available(place)
+                | Predicate::NoLoanConflict(place) => (place.0 as usize) < report.places.len(),
                 _ => true,
             };
             let input_sources: std::collections::HashSet<_> =
@@ -470,6 +477,7 @@ pub(crate) fn analyze_validated(
             reports: Vec::new(),
         },
         &Summaries::default(),
+        None,
     )
 }
 
@@ -478,6 +486,7 @@ pub(crate) fn analyze_with_summaries(
     diagnostics: &mut Vec<Diagnostic>,
     mut external: Bindings,
     summaries: &Summaries,
+    sources: Option<&SourceMap>,
 ) -> Report {
     if crate::sema::requires_execution_mir(program) {
         if let Some(function) = program.functions.first() {
@@ -578,6 +587,7 @@ pub(crate) fn analyze_with_summaries(
                         memory: &inferred,
                     },
                     diagnostics,
+                    sources,
                 )
                 .report;
                 if let Some(summary) = &checked.memory

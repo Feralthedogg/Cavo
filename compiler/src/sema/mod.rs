@@ -93,6 +93,7 @@ struct Context<'a> {
     sources: &'a SourceMap,
     symbols: &'a Interner,
     diagnostics: &'a mut Vec<Diagnostic>,
+    unresolved_names: HashMap<(ModuleId, Vec<Symbol>), UnknownName>,
     program: hir::Program,
     module_paths: HashMap<Vec<Symbol>, ModuleId>,
     names: Vec<HashMap<Symbol, DefId>>,
@@ -113,6 +114,12 @@ struct Context<'a> {
     trait_state: traits::State,
 }
 
+#[derive(Clone, Copy)]
+struct UnknownName {
+    diagnostic: usize,
+    span: Span,
+}
+
 impl<'a> Context<'a> {
     fn new(
         ast: &'a Ast,
@@ -130,6 +137,7 @@ impl<'a> Context<'a> {
             sources,
             symbols,
             diagnostics,
+            unresolved_names: HashMap::new(),
             program: hir::Program {
                 modular: crate::modular::Declarations::default(),
                 tasks: crate::tasks::Declarations::default(),
@@ -874,12 +882,7 @@ impl Context<'_> {
         let definition = self.lookup(module, path);
         let span = path.first()?.span.join(path.last()?.span);
         let Some(definition) = definition else {
-            let name = self.path_name(path);
-            report(
-                self.diagnostics,
-                Diagnostic::error("E-NAME-UNKNOWN", format!("unknown name '{name}'"), span)
-                    .primary_label(format!("'{name}' is not defined in this scope")),
-            );
+            self.unknown_name(module, path, span);
             return None;
         };
         let found = self.definition(definition);
@@ -896,6 +899,48 @@ impl Context<'_> {
             return None;
         }
         Some(definition)
+    }
+
+    fn unknown_name(&mut self, module: ModuleId, path: &[Name], span: Span) {
+        let absent_root = path.len() > 1
+            && self.lookup(module, &path[..1]).is_none()
+            && !self.is_namespace(module, &path[..1]);
+        let prefix = if absent_root { &path[..1] } else { path };
+        let key = (module, prefix.iter().map(|name| name.symbol).collect());
+        if let Some(previous) = self.unresolved_names.get(&key).copied()
+            && let Some(diagnostic) = self.diagnostics.get_mut(previous.diagnostic)
+            && diagnostic.code == "E-NAME-UNKNOWN"
+            && diagnostic.primary == previous.span
+        {
+            // Suppress a repeated missing root only while its real diagnostic
+            // still exists. Error recovery must never erase the root rejection.
+            if diagnostic.labels.len() < 4
+                && span != diagnostic.primary
+                && !diagnostic.labels.iter().any(|label| label.span == span)
+            {
+                diagnostic.labels.push(crate::diagnostic::Label {
+                    span,
+                    message: "same unresolved name used here".into(),
+                });
+            }
+            return;
+        }
+        let name = self.path_name(path);
+        let index = self.diagnostics.len();
+        report(
+            self.diagnostics,
+            Diagnostic::error("E-NAME-UNKNOWN", format!("unknown name '{name}'"), span)
+                .primary_label(format!("'{name}' is not defined in this scope")),
+        );
+        if self.diagnostics.len() > index {
+            self.unresolved_names.insert(
+                key,
+                UnknownName {
+                    diagnostic: index,
+                    span,
+                },
+            );
+        }
     }
 
     fn visible(&self, visibility: Visibility, owner: ModuleId, requester: ModuleId) -> bool {

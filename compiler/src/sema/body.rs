@@ -905,6 +905,9 @@ impl<'a, 'b> Body<'a, 'b> {
                 }
                 let base = self.expression(*base, None);
                 let mut ty = self.ty(base);
+                if self.type_is_error(ty) {
+                    return self.add_expr(H::Error, TyId::ERROR, source.span);
+                }
                 if let Ty::Reference { inner, .. } = self.type_kind(ty) {
                     ty = *inner;
                 }
@@ -1052,6 +1055,19 @@ impl<'a, 'b> Body<'a, 'b> {
         };
         self.add_expr(kind, ty, source.span)
     }
+    fn type_is_error(&self, mut ty: TyId) -> bool {
+        // Recovery may look through reference wrappers without granting new
+        // autodereference behavior or hiding errors on known nominal shapes.
+        for _ in 0..128 {
+            match self.type_kind(ty) {
+                Ty::Error => return true,
+                Ty::Reference { inner, .. } => ty = *inner,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn read_local(&mut self, local: LocalId, span: Span) -> ExprId {
         // Initialization at uses is checked on the CFG, including loop backedges.
         self.add_expr(H::Local(local), self.function.locals[local].ty, span)

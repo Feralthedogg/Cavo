@@ -14,6 +14,9 @@ impl Body<'_, '_> {
         span: Span,
     ) -> Option<ExprId> {
         let (mut target, name, explicit_owner) = self.associated_target(callee)?;
+        if self.type_is_error(target) {
+            return Some(self.error_call(arguments, span));
+        }
         if let Ty::Named { definition, .. } = self.type_kind(target)
             && let Some(&variant) = self.context.variants.get(&(*definition, name.symbol))
         {
@@ -91,6 +94,9 @@ impl Body<'_, '_> {
         span: Span,
     ) -> (H, TyId) {
         let target = self.resolve_type(owner);
+        if self.type_is_error(target) {
+            return (H::Error, TyId::ERROR);
+        }
         if let Ty::Named { definition, .. } = self.type_kind(target)
             && let Some(&variant) = self.context.variants.get(&(*definition, name.symbol))
             && !matches!(
@@ -188,6 +194,9 @@ impl Body<'_, '_> {
         }
         let receiver = self.expression(base, None);
         let target = self.receiver_type(receiver);
+        if self.type_is_error(target) {
+            return Some(self.error_call(arguments, span));
+        }
         if let Some(field) = self.callable_field(receiver, target, name) {
             let target = ResolvedCall {
                 callee: field,
@@ -201,7 +210,7 @@ impl Body<'_, '_> {
             return Some(self.dynamic_call(receiver, target, name, explicit, arguments, span));
         }
         let Some(target) = self.static_method_target(receiver, target, name, span) else {
-            return Some(self.add_expr(H::Error, TyId::ERROR, span));
+            return Some(self.error_call(arguments, span));
         };
         Some(self.call_resolved(target, explicit, arguments, expected, span))
     }

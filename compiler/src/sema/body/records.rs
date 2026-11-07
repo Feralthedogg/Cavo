@@ -49,6 +49,9 @@ impl Body<'_, '_> {
         span: Span,
     ) -> ExprId {
         let Some(mut construction) = self.record_target(path, expected, span) else {
+            for &(_, value) in fields {
+                self.expression(value, None);
+            }
             return self.add_expr(H::Error, TyId::ERROR, span);
         };
         let mut values = Vec::with_capacity(fields.len());
@@ -166,6 +169,9 @@ impl Body<'_, '_> {
             && self.context.symbols.get(path[0].symbol) == "Self"
             && let Some(&ty) = self.generic_types.get(&path[0].symbol)
         {
+            if self.type_is_error(ty) {
+                return None;
+            }
             return Some(Origin {
                 ty,
                 alias: None,
@@ -175,6 +181,9 @@ impl Body<'_, '_> {
         let owner = self.context.resolve(self.module, path)?;
         let definition = self.context.definition(owner);
         let ty = definition.ty;
+        if self.type_is_error(ty) {
+            return None;
+        }
         let alias = (definition.kind == hir::DefinitionKind::TypeAlias).then_some((owner, ty));
         let seed = if alias.is_some() && definition.generic_parameter_kinds.is_empty() {
             Seed::Fixed

@@ -189,6 +189,9 @@ impl Body<'_, '_> {
     }
 
     fn result_variants(&mut self, ty: TyId, span: Span) -> Option<(DefId, DefId)> {
+        if self.type_is_error(ty) {
+            return None;
+        }
         let Some(owner) = self.context.result_item else {
             self.context.error(
                 "E-TRY-RESULT",

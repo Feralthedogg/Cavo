@@ -11,7 +11,7 @@ use crate::arena::Access as _;
 use crate::{
     diagnostic::{Diagnostic, MoveCertainty, report},
     hir::{self, ExprId, ExprKind as H},
-    source::Span,
+    source::{SourceMap, Span},
     syntax::ast::{BinaryOp, UnaryOp},
     types::{Region, Ty},
 };
@@ -25,7 +25,6 @@ const AVAILABLE: u8 = 1;
 const UNINITIALIZED: u8 = 2;
 const MOVED: u8 = 4;
 const DEAD: u8 = 8;
-const POISON: u8 = 16;
 const MAX_ORIGINS: usize = 64;
 const MAX_RETURN_VALUE_COST: usize = 4096;
 const MAX_RETURN_STATE_COST: usize = 250_000;
@@ -127,6 +126,9 @@ struct Slot {
     // Powerset of possible concrete availability states, not independent flags.
     // Only the singleton AVAILABLE establishes availability at a CFG point.
     flags: u8,
+    // An assignment can write an erroneous value without undoing the storage's
+    // initialization. Data health is a separate, monotone axis at CFG joins.
+    poisoned: bool,
     origins: Origins,
     causes: Causes,
     functions: BTreeSet<hir::DefId>,
@@ -134,6 +136,8 @@ struct Slot {
 }
 struct PlaceState {
     flags: u8,
+    poisoned: bool,
+    complete: bool,
     origins: Origins,
     causes: Causes,
     functions: BTreeSet<hir::DefId>,
@@ -142,6 +146,7 @@ impl Default for Slot {
     fn default() -> Self {
         Self {
             flags: DEAD,
+            poisoned: false,
             origins: Origins::new(),
             causes: Causes::new(),
             functions: BTreeSet::new(),
@@ -174,12 +179,14 @@ impl State {
         for (left, right) in self.slots.iter_mut().zip(&other.slots) {
             let before = (
                 left.flags,
+                left.poisoned,
                 left.origins.len(),
                 left.causes.len(),
                 left.functions.len(),
                 left.written,
             );
             left.flags |= right.flags;
+            left.poisoned |= right.poisoned;
             left.written = left.written.join(right.written);
             left.functions.extend(&right.functions);
             left.origins.extend(right.origins.iter().cloned());
@@ -187,6 +194,7 @@ impl State {
             changed |= before
                 != (
                     left.flags,
+                    left.poisoned,
                     left.origins.len(),
                     left.causes.len(),
                     left.functions.len(),
@@ -707,6 +715,7 @@ pub(super) fn analyze(
     properties: &Properties,
     calls: Calls<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    sources: Option<&SourceMap>,
 ) -> Run {
     let context = Analysis {
         function,
@@ -742,7 +751,7 @@ pub(super) fn analyze(
             },
         };
     };
-    let mut reporter = report::Diagnostics::new(&graph);
+    let mut reporter = report::Diagnostics::new(&graph, sources);
     let traced = trace(context, &mut converged, &mut reporter);
     let memory = finish_memory(context, &converged, &traced, reporter.status.failed);
     let mut complete = !traced.limited
@@ -1076,6 +1085,41 @@ impl<R: Reporter> Evaluator<'_, R> {
             0,
         );
     }
+
+    fn returned_locals(&self, value: &Value) -> Vec<(hir::LocalId, EventId)> {
+        let mut locals: Vec<_> = value
+            .origins
+            .iter()
+            .filter_map(|origin| match origin {
+                Origin::Borrow { place, event, .. }
+                    if self.places.input_source(*place).is_none() =>
+                {
+                    Some((self.places.owner(*place), *event))
+                }
+                _ => None,
+            })
+            .collect();
+        locals.sort_by_key(|&(owner, event)| (owner.0, event.0));
+        locals.dedup_by_key(|entry| entry.0);
+        locals
+    }
+
+    fn report_local_returns(&mut self, locals: &[(hir::LocalId, EventId)], span: Span) {
+        for &(owner, event) in locals {
+            self.reporter.problem(Problem::LocalReturn {
+                span,
+                storage: self
+                    .function
+                    .locals
+                    .get_id(owner)
+                    .expect("local borrow owner")
+                    .span,
+                borrow: self.graph.event(event).span,
+                owner,
+            });
+        }
+    }
+
     fn live(&self) -> &Live {
         if let Some(id) = self.live_expression {
             self.liveness.expression(id)
@@ -1157,6 +1201,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                     };
                     state.slots[index] = Slot {
                         flags: AVAILABLE,
+                        poisoned: false,
                         origins,
                         causes: Causes::from([event]),
                         functions: BTreeSet::new(),
@@ -1204,6 +1249,7 @@ impl<R: Reporter> Evaluator<'_, R> {
                 for index in self.places.leaves(Places::root(local)) {
                     state.slots[index] = Slot {
                         flags: DEAD,
+                        poisoned: false,
                         origins: Origins::new(),
                         causes: Causes::from([event]),
                         functions: BTreeSet::new(),
@@ -1236,33 +1282,16 @@ impl<R: Reporter> Evaluator<'_, R> {
                     if !state.normal {
                         return;
                     }
-                    let local = value.origins.iter().find_map(|origin| match origin {
-                        Origin::Borrow { place, event, .. }
-                            if self.places.input_source(*place).is_none() =>
-                        {
-                            Some((self.places.owner(*place), *event))
-                        }
-                        _ => None,
-                    });
-                    let diagnostic = local.map(|(owner, event)| Problem::LocalReturn {
-                        span,
-                        storage: self
-                            .function
-                            .locals
-                            .get_id(owner)
-                            .expect("local borrow owner")
-                            .span,
-                        borrow: self.graph.event(event).span,
-                        owner,
-                    });
+                    let locals = self.returned_locals(&value);
                     self.finding(
                         Predicate::ReturnDoesNotBorrowLocalStorage,
                         span,
-                        value.valid && local.is_none(),
+                        value.valid && locals.is_empty(),
                         value.causes.clone(),
-                        diagnostic,
+                        None,
                     );
-                    if local.is_none() {
+                    self.report_local_returns(&locals, span);
+                    if locals.is_empty() {
                         self.check_return(&value, state, span);
                     }
                     state.returned = Some(value);
@@ -1301,7 +1330,10 @@ impl<R: Reporter> Evaluator<'_, R> {
                 }
                 let source = self.summary(Places::root(slot), state);
                 let value = Value {
-                    valid: source.flags == AVAILABLE && supported,
+                    valid: source.complete
+                        && source.flags == AVAILABLE
+                        && !source.poisoned
+                        && supported,
                     origins: if self
                         .properties
                         .get(self.function.locals[local].ty)
@@ -1446,7 +1478,8 @@ impl<R: Reporter> Evaluator<'_, R> {
         }
         let mut slot = match value {
             Some(value) => Slot {
-                flags: if value.valid { AVAILABLE } else { POISON },
+                flags: AVAILABLE,
+                poisoned: !value.valid,
                 origins: if self.properties.get(self.places.ty(place)).references {
                     value.origins.clone()
                 } else {
@@ -1462,6 +1495,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             },
             None => Slot {
                 flags: UNINITIALIZED,
+                poisoned: false,
                 origins: Origins::new(),
                 causes: Causes::new(),
                 functions: BTreeSet::new(),
@@ -1474,6 +1508,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             // The selected address/path is uncertain. Retain the untouched
             // state, including its loans and callable targets, as an alternative.
             state.slots[index].flags |= slot.flags;
+            state.slots[index].poisoned |= slot.poisoned;
             state.slots[index].written = state.slots[index].written.join(slot.written);
             state.slots[index].functions.extend(slot.functions);
             state.slots[index].origins.extend(slot.origins);
@@ -1486,6 +1521,8 @@ impl<R: Reporter> Evaluator<'_, R> {
     fn summary(&mut self, place: PlaceId, state: &State) -> PlaceState {
         let mut result = PlaceState {
             flags: 0,
+            poisoned: false,
+            complete: true,
             origins: Origins::new(),
             causes: Causes::new(),
             functions: BTreeSet::new(),
@@ -1493,12 +1530,13 @@ impl<R: Reporter> Evaluator<'_, R> {
         for index in self.places.leaves(place) {
             let slot = &state.slots[index];
             result.flags |= slot.flags;
+            result.poisoned |= slot.poisoned;
             result.functions.extend(&slot.functions);
             result.origins.extend(slot.origins.iter().cloned());
             result.causes.extend(slot.causes.iter().copied());
             if result.origins.len() > MAX_ORIGINS || result.causes.len() > 128 {
                 self.exhausted = true;
-                result.flags = POISON;
+                result.complete = false;
                 break;
             }
         }
@@ -1523,7 +1561,7 @@ impl<R: Reporter> Evaluator<'_, R> {
             None
         };
         Value {
-            valid: slot.flags == AVAILABLE,
+            valid: slot.complete && slot.flags == AVAILABLE && !slot.poisoned,
             origins: slot.origins,
             causes: slot.causes,
             fields,
@@ -1639,11 +1677,12 @@ impl<R: Reporter> Evaluator<'_, R> {
                             ..
                         } = target
                         {
+                            let mut permitted = true;
                             if self.places.input_source(place).is_none() {
-                                value.valid &= self.available(place, node.span, state);
+                                permitted &= self.available(place, node.span, state);
                                 value.causes.extend(self.summary(place, state).causes);
                             }
-                            value.valid &= self.access(
+                            permitted &= self.access(
                                 &target,
                                 if mutable {
                                     Access::BorrowExclusive
@@ -1657,13 +1696,20 @@ impl<R: Reporter> Evaluator<'_, R> {
                             // capabilities it exposes. A frozen parent &mut
                             // cannot be smuggled into another call via &&mut.
                             let contained = self.value(place, state);
-                            value.valid &= self.capabilities(
+                            permitted &= self.capabilities(
                                 &contained.origins,
                                 mutable,
                                 false,
                                 node.span,
                                 state,
                             );
+                            value.valid &= permitted;
+                            // A failed borrow creates no new loan. Keep this
+                            // per target so valid alternatives on another path
+                            // still retain their real loans after a CFG join.
+                            if !permitted {
+                                continue;
+                            }
                             let parents = self.lineage(via, None, Some(LoanId::Borrow(event)));
                             if via != LoanSetId(0) {
                                 self.reporter.reborrow(
@@ -1683,6 +1729,8 @@ impl<R: Reporter> Evaluator<'_, R> {
                             });
                         } else if matches!(target, Target::Static) && !mutable {
                             value.origins.insert(Origin::Static);
+                        } else if matches!(target, Target::Invalid) {
+                            value.valid = false;
                         } else {
                             self.unsupported("this reborrow's provenance", node.span);
                             value.valid = false;
@@ -2464,7 +2512,8 @@ impl<R: Reporter> Evaluator<'_, R> {
     fn available(&mut self, place: PlaceId, span: Span, state: &State) -> bool {
         let slot = self.summary(place, state);
         let local = self.places.owner(place);
-        let valid = slot.flags == AVAILABLE;
+        let storage_available = slot.complete && slot.flags == AVAILABLE;
+        let valid = storage_available && !slot.poisoned;
         let failure = if slot.flags & MOVED != 0 {
             let certainty = if self
                 .places
@@ -2481,12 +2530,19 @@ impl<R: Reporter> Evaluator<'_, R> {
         } else {
             AvailabilityFailure::Uninitialized
         };
-        let diagnostic = (!valid && slot.flags != POISON).then_some(Problem::Availability {
+        let diagnostic = (!storage_available && slot.complete).then_some(Problem::Availability {
             span,
             binding: self.function.locals.get_id(local).map(|l| l.span),
             failure,
             causes: &slot.causes,
         });
+        self.finding(
+            Predicate::StorageAvailable(place),
+            span,
+            storage_available,
+            slot.causes.clone(),
+            None,
+        );
         self.finding(
             Predicate::Available(place),
             span,

@@ -60,7 +60,7 @@ pub(super) enum Problem<'a> {
     },
 }
 impl Problem<'_> {
-    fn diagnostic(self, graph: &Graph) -> Diagnostic {
+    fn diagnostic(self, graph: &Graph, sources: Option<&SourceMap>) -> Diagnostic {
         match self {
             Self::DropPartialMove(span) => Diagnostic::error(
                 "E-MOVE-DROP",
@@ -121,6 +121,9 @@ impl Problem<'_> {
             Self::RegionReturn { span, signature } => {
                 let message = "returned reference does not satisfy the declared input lifetime";
                 Diagnostic::error("E-REGION-RETURN", message, span)
+                    .primary_label(
+                        "the reference's actual origin does not outlive the declared region",
+                    )
                     .label(signature, "return region is declared by this signature")
                     .help(concat!(
                         "return a reference from an allowed input, ",
@@ -139,7 +142,7 @@ impl Problem<'_> {
                     span,
                 );
                 diagnostic
-                    .primary_label("this reference would outlive its local owner")
+                    .primary_label(local_owner_label(storage, sources))
                     .label(storage, "local storage is declared here")
                     .label(borrow, "reference borrows this storage")
                     .help("return an owned value or a reference tied to an input")
@@ -206,6 +209,24 @@ impl Problem<'_> {
             }
         }
     }
+}
+
+fn local_owner_label(storage: Span, sources: Option<&SourceMap>) -> String {
+    if let Some(sources) = sources {
+        // The resolved owner's declaration span supplies its display name.
+        // Return-expression text would name an alias instead of the owner;
+        // non-identifier temporary spans deliberately keep the generic label.
+        let name = sources.file(storage.file).slice(storage);
+        if name
+            .as_bytes()
+            .first()
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+            && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return format!("this reference would outlive `{name}`");
+        }
+    }
+    "this reference would outlive its local owner".into()
 }
 
 fn ended_storage(span: Span, causes: &Causes, graph: &Graph) -> Diagnostic {
@@ -308,9 +329,11 @@ pub(super) struct Diagnostics<'a> {
     storage_ends: HashMap<EventId, usize>,
     lifetime_owners: HashMap<usize, hir::LocalId>,
     returned_owners: HashSet<hir::LocalId>,
+    region_returns: HashSet<Span>,
+    sources: Option<&'a SourceMap>,
 }
 impl<'a> Diagnostics<'a> {
-    pub fn new(graph: &'a Graph) -> Self {
+    pub fn new(graph: &'a Graph, sources: Option<&'a SourceMap>) -> Self {
         Self {
             status: Summary::default(),
             graph,
@@ -323,6 +346,8 @@ impl<'a> Diagnostics<'a> {
             storage_ends: HashMap::new(),
             lifetime_owners: HashMap::new(),
             returned_owners: HashSet::new(),
+            region_returns: HashSet::new(),
+            sources,
         }
     }
 
@@ -405,6 +430,14 @@ impl Reporter for Diagnostics<'_> {
         if self.lifetime_cascade(&problem) {
             return;
         }
+        if let Problem::Region {
+            code: "E-REGION-RETURN",
+            span,
+        } = &problem
+            && self.region_returns.contains(span)
+        {
+            return;
+        }
         let ended = match &problem {
             Problem::StorageEnd { end, owner, .. } => Some((*end, *owner)),
             _ => None,
@@ -413,8 +446,15 @@ impl Reporter for Diagnostics<'_> {
             Problem::LocalReturn { owner, .. } => Some(*owner),
             _ => None,
         };
+        let region_return = match &problem {
+            Problem::RegionReturn { span, .. } => Some(*span),
+            _ => None,
+        };
         let index = self.diagnostics.len();
-        report(&mut self.diagnostics, problem.diagnostic(self.graph));
+        report(
+            &mut self.diagnostics,
+            problem.diagnostic(self.graph, self.sources),
+        );
         if self.diagnostics.len() == index {
             return;
         }
@@ -424,6 +464,9 @@ impl Reporter for Diagnostics<'_> {
         }
         if let Some(owner) = returned {
             self.returned_owners.insert(owner);
+        }
+        if let Some(span) = region_return {
+            self.region_returns.insert(span);
         }
     }
     fn reborrow(&mut self, point: Point, loan: LoanId, event: EventId, parents: &[LoanId]) {
